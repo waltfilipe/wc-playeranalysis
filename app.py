@@ -9,8 +9,7 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 from matplotlib.lines import Line2D
-from matplotlib.patches import FancyArrowPatch, Rectangle
-from matplotlib.colors import Normalize, LinearSegmentedColormap
+from matplotlib.patches import FancyArrowPatch
 from mplsoccer import Pitch
 from PIL import Image
 
@@ -49,10 +48,11 @@ FIELD_X, FIELD_Y = 120.0, 80.0
 HALF_LINE_X = FIELD_X / 2
 FINAL_THIRD_LINE_X = 80.0
 GOAL_X, GOAL_Y = 120.0, 40.0
-LANE_LEFT_MIN = 53.33
-LANE_RIGHT_MAX = 26.67
-FIG_W, FIG_H = 4.2, 2.8
-FIG_DPI = 120
+FIG_W, FIG_H = 6.2, 4.1
+FIG_DPI = 160
+PASS_START_MARKER_SIZE = 10
+CARRY_START_MARKER_SIZE = 10
+MAP_REF_WIDTH = 6.2
 WYSCOUT_PITCH_SIZE = 100.0
 OPT_ATTACKING_TWO_THIRDS_X = 40.0
 WYSCOUT_PROG_OWN_HALF = 30.0
@@ -105,22 +105,16 @@ PLAYER_TONE = "#5b9bd5"
 COLOR_SUCCESS = "#c8c8c8"
 COLOR_PROGRESSIVE = "#2F80ED"
 COLOR_HIGHLY_PROGRESSIVE = "#1B44A8"
-COLOR_KEY_PASS = "#f59e0b"
 COLOR_FAIL = "#E07070"
 ALPHA_SUCCESS = 0.07
+COLOR_CARRY = "#a855f7"
+COLOR_CARRY_BASE_ALPHA = 0.50
 
 ACTION_COLORS = {
     "passes": "#5b9bd5",
     "dribbles": "#22c55e",
     "ball-carries": "#a855f7",
     "defensive": "#ef4444",
-}
-
-DEFENSIVE_MARKERS = {
-    "tackle": "s",
-    "interception": "D",
-    "clearance": "^",
-    "ball-recovery": "o",
 }
 
 CATEGORY_LABELS = {
@@ -143,6 +137,7 @@ ACTION_TYPE_LABELS = {
 
 # ── COORDINATE HELPERS ───────────────────────────────────────
 def wyscout_to_statsbomb(x: float, y: float) -> tuple[float, float]:
+    """Wyscout 0–100 → StatsBomb 120×80 (ataque da esquerda para a direita)."""
     return x * FIELD_X / WYSCOUT_PITCH_SIZE, y * FIELD_Y / WYSCOUT_PITCH_SIZE
 
 
@@ -675,7 +670,31 @@ def _base_pitch(bg="#1a1a2e"):
     return fig, ax, pitch
 
 
+def _map_scale() -> float:
+    return FIG_W / MAP_REF_WIDTH
+
+
+def _add_map_legend(ax, handles: list) -> None:
+    scale = _map_scale()
+    leg = ax.legend(
+        handles=handles,
+        loc="upper left",
+        bbox_to_anchor=(0.01, 0.99),
+        frameon=True,
+        facecolor="#1a1a2e",
+        edgecolor="#444466",
+        fontsize=6.2 * scale,
+        labelspacing=0.35 * scale,
+        borderpad=0.45 * scale,
+        handlelength=1.9 * scale,
+    )
+    for text in leg.get_texts():
+        text.set_color("white")
+    leg.get_frame().set_alpha(0.90)
+
+
 def _attack_arrow(fig, has_cbar: bool = False):
+    scale = _map_scale()
     ox = -0.04 if has_cbar else 0.0
     fig.patches.append(
         FancyArrowPatch(
@@ -683,8 +702,8 @@ def _attack_arrow(fig, has_cbar: bool = False):
             (0.56 + ox, 0.045),
             transform=fig.transFigure,
             arrowstyle="-|>",
-            mutation_scale=11,
-            linewidth=1.6,
+            mutation_scale=10 * scale,
+            linewidth=1.4 * scale,
             color="#aaaaaa",
         )
     )
@@ -695,7 +714,7 @@ def _attack_arrow(fig, has_cbar: bool = False):
         ha="center",
         va="bottom",
         transform=fig.transFigure,
-        fontsize=7.5,
+        fontsize=7.0 * scale,
         color="#aaaaaa",
     )
 
@@ -708,75 +727,10 @@ def _save_fig(fig):
     return Image.open(buf)
 
 
-def draw_action_map(df: pd.DataFrame, categories: set[str] | None = None):
-    fig, ax, pitch = _base_pitch()
-    subset = df if categories is None else df[df["category"].isin(categories)]
-
-    for _, row in subset.iterrows():
-        category = row["category"]
-        color = ACTION_COLORS.get(category, "#94a3b8")
-        alpha = 0.90 if row["is_success"] or category == "ball-carries" else 0.55
-        if not row["is_success"] and category == "passes":
-            color = COLOR_FAIL
-            alpha = 0.72
-
-        if row["has_end"]:
-            pitch.arrows(
-                row["x_start"],
-                row["y_start"],
-                row["x_end"],
-                row["y_end"],
-                color=color,
-                width=1.0,
-                headwidth=1.8,
-                headlength=1.8,
-                ax=ax,
-                zorder=3,
-                alpha=alpha,
-            )
-        else:
-            marker = DEFENSIVE_MARKERS.get(row["action_type"], "o")
-            pitch.scatter(
-                row["x_start"],
-                row["y_start"],
-                s=70,
-                marker=marker,
-                color=color,
-                edgecolors="white",
-                linewidths=0.6,
-                ax=ax,
-                zorder=5,
-                alpha=alpha,
-            )
-
-    legend_handles = [
-        Line2D([0], [0], color=ACTION_COLORS["passes"], lw=2.0, label="Passes"),
-        Line2D([0], [0], color=ACTION_COLORS["dribbles"], lw=2.0, label="Dribles"),
-        Line2D([0], [0], color=ACTION_COLORS["ball-carries"], lw=2.0, label="Conduções"),
-        Line2D([0], [0], color=ACTION_COLORS["defensive"], lw=2.0, label="Defensivas"),
-        Line2D([0], [0], color=COLOR_FAIL, lw=2.0, label="Passe incompleto"),
-    ]
-    leg = ax.legend(
-        handles=legend_handles,
-        loc="upper left",
-        bbox_to_anchor=(0.01, 0.99),
-        frameon=True,
-        facecolor="#1a1a2e",
-        edgecolor="#444466",
-        fontsize=5.5,
-        labelspacing=0.3,
-        borderpad=0.35,
-    )
-    for text in leg.get_texts():
-        text.set_color("white")
-    leg.get_frame().set_alpha(0.90)
-    _attack_arrow(fig)
-    return _save_fig(fig), fig
-
-
 def draw_pass_map(df: pd.DataFrame):
     passes = df[df["category"] == "passes"].copy()
     fig, ax, pitch = _base_pitch()
+    scale = _map_scale()
 
     for _, row in passes.iterrows():
         if not row["has_end"]:
@@ -784,15 +738,12 @@ def draw_pass_map(df: pd.DataFrame):
         is_lost = not row["is_success"]
         is_high_impact = bool(row.get("high_impact_pass", False))
         is_prog = bool(row.get("progressive", False))
-        is_key = bool(row.get("is_key_pass", False))
         if is_lost:
             color, alpha = COLOR_FAIL, 0.72
         elif is_high_impact:
             color, alpha = COLOR_HIGHLY_PROGRESSIVE, 0.95
         elif is_prog:
             color, alpha = COLOR_PROGRESSIVE, 0.88
-        elif is_key:
-            color, alpha = COLOR_KEY_PASS, 0.95
         else:
             color, alpha = COLOR_SUCCESS, ALPHA_SUCCESS
 
@@ -802,9 +753,9 @@ def draw_pass_map(df: pd.DataFrame):
             row["x_end"],
             row["y_end"],
             color=color,
-            width=1.1,
-            headwidth=1.8,
-            headlength=1.8,
+            width=1.3 * scale,
+            headwidth=2.0 * scale,
+            headlength=2.0 * scale,
             ax=ax,
             zorder=3,
             alpha=alpha,
@@ -812,122 +763,100 @@ def draw_pass_map(df: pd.DataFrame):
         pitch.scatter(
             row["x_start"],
             row["y_start"],
-            s=24,
+            s=PASS_START_MARKER_SIZE,
             marker="o",
             color=color,
             edgecolors="white",
-            linewidths=0.5,
+            linewidths=0.4,
             ax=ax,
             zorder=6,
             alpha=alpha,
         )
 
     legend_handles = [
-        Line2D([0], [0], color=COLOR_SUCCESS, lw=2.0, label="Completado", alpha=0.65),
-        Line2D([0], [0], color=COLOR_PROGRESSIVE, lw=2.0, label="Progressivo (Wyscout)", alpha=0.90),
-        Line2D([0], [0], color=COLOR_HIGHLY_PROGRESSIVE, lw=2.0, label="High Impact (xT v3)", alpha=0.95),
-        Line2D([0], [0], color=COLOR_FAIL, lw=2.0, label="Incompleto", alpha=0.90),
+        Line2D([0], [0], color=COLOR_SUCCESS, lw=2.0 * scale, label="Completado", alpha=0.65),
+        Line2D([0], [0], color=COLOR_PROGRESSIVE, lw=2.0 * scale, label="Progressivo (Wyscout)", alpha=0.90),
+        Line2D([0], [0], color=COLOR_HIGHLY_PROGRESSIVE, lw=2.0 * scale, label="High Impact (xT v3)", alpha=0.95),
+        Line2D([0], [0], color=COLOR_FAIL, lw=2.0 * scale, label="Incompleto", alpha=0.90),
     ]
-    leg = ax.legend(
-        handles=legend_handles,
-        loc="upper left",
-        bbox_to_anchor=(0.01, 0.99),
-        frameon=True,
-        facecolor="#1a1a2e",
-        edgecolor="#444466",
-        fontsize=5.5,
-        labelspacing=0.3,
-        borderpad=0.35,
-    )
-    for text in leg.get_texts():
-        text.set_color("white")
-    leg.get_frame().set_alpha(0.90)
+    _add_map_legend(ax, legend_handles)
     _attack_arrow(fig)
     return _save_fig(fig), fig
 
 
-def draw_destination_heatmap(df: pd.DataFrame):
-    df_s = df[(df["category"] == "passes") & df["is_success"] & df["has_end"]].copy()
-    x_bins = np.linspace(0.0, FIELD_X, 7)
-    corridors = {
-        "left": (LANE_LEFT_MIN, FIELD_Y),
-        "center": (LANE_RIGHT_MAX, LANE_LEFT_MIN),
-        "right": (0.0, LANE_RIGHT_MAX),
-    }
-    counts = {}
-    for cname, (y0, y1) in corridors.items():
-        arr = np.zeros(6, dtype=int)
-        for i in range(6):
-            x0_, x1_ = x_bins[i], x_bins[i + 1]
-            arr[i] = int(
-                (
-                    (df_s["x_end"] >= x0_)
-                    & (df_s["x_end"] < x1_)
-                    & (df_s["y_end"] >= y0)
-                    & (df_s["y_end"] < y1)
-                ).sum()
-            )
-        counts[cname] = arr
-
-    all_vals = np.concatenate([counts[c] for c in counts]) if counts else np.array([0])
-    vmax = max(1, int(all_vals.max()))
-    cmap = LinearSegmentedColormap.from_list("wr", ["#ffffff", "#ffecec", "#ffbfbf", "#ff8080", "#ff3b3b", "#ff0000"])
-    norm = Normalize(vmin=0, vmax=vmax)
-    threshold = max(1, vmax * 0.35)
-
+def draw_carry_map(df: pd.DataFrame):
+    carries = df[df["category"] == "ball-carries"].copy()
     fig, ax, pitch = _base_pitch()
-    for cname, (y0, y1) in corridors.items():
-        for i in range(6):
-            x0_, x1_ = x_bins[i], x_bins[i + 1]
-            value = counts[cname][i]
-            ax.add_patch(
-                Rectangle(
-                    (x0_, y0),
-                    x1_ - x0_,
-                    y1 - y0,
-                    facecolor=cmap(norm(value)),
-                    edgecolor=(1, 1, 1, 0.12),
-                    lw=0.5,
-                    alpha=0.95,
-                    zorder=2,
-                )
-            )
-            ax.text(
-                (x0_ + x1_) / 2,
-                (y0 + y1) / 2,
-                str(value),
-                ha="center",
-                va="center",
-                color="#000000" if value <= threshold else "#ffffff",
-                fontsize=7,
-                fontweight="700" if value >= vmax * 0.5 else "600",
-                zorder=4,
-            )
+    scale = _map_scale()
 
-    ax.axhline(y=LANE_LEFT_MIN, color="#ffffff", lw=0.5, alpha=0.15, linestyle="--", zorder=3)
-    ax.axhline(y=LANE_RIGHT_MAX, color="#ffffff", lw=0.5, alpha=0.15, linestyle="--", zorder=3)
+    for _, row in carries.iterrows():
+        if not row["has_end"]:
+            continue
+        is_high_impact = bool(row.get("high_impact_carry", False))
+        is_impact = bool(row.get("impact_carry", False))
+        if is_high_impact:
+            color, alpha = COLOR_HIGHLY_PROGRESSIVE, 0.95
+        elif is_impact:
+            color, alpha = COLOR_PROGRESSIVE, 0.88
+        else:
+            color, alpha = COLOR_CARRY, COLOR_CARRY_BASE_ALPHA
+
+        pitch.arrows(
+            row["x_start"],
+            row["y_start"],
+            row["x_end"],
+            row["y_end"],
+            color=color,
+            width=1.3 * scale,
+            headwidth=2.0 * scale,
+            headlength=2.0 * scale,
+            ax=ax,
+            zorder=3,
+            alpha=alpha,
+        )
+        pitch.scatter(
+            row["x_start"],
+            row["y_start"],
+            s=CARRY_START_MARKER_SIZE,
+            marker="o",
+            color=color,
+            edgecolors="white",
+            linewidths=0.4,
+            ax=ax,
+            zorder=6,
+            alpha=alpha,
+        )
+
+    legend_handles = [
+        Line2D([0], [0], color=COLOR_CARRY, lw=2.0 * scale, label="Condução", alpha=0.65),
+        Line2D([0], [0], color=COLOR_PROGRESSIVE, lw=2.0 * scale, label="Impact (xT v3)", alpha=0.90),
+        Line2D([0], [0], color=COLOR_HIGHLY_PROGRESSIVE, lw=2.0 * scale, label="High Impact (xT v3)", alpha=0.95),
+    ]
+    _add_map_legend(ax, legend_handles)
     _attack_arrow(fig)
     return _save_fig(fig), fig
 
 
-def render_maps(df: pd.DataFrame, categories: set[str] | None = None):
-    maps: list[tuple[str, Image.Image, object]] = []
+def render_maps(df: pd.DataFrame):
+    col_pass, col_carry = st.columns(2)
 
-    img_action, fig_action = draw_action_map(df, categories)
-    maps.append(("Mapa de Ações", img_action, fig_action))
+    with col_pass:
+        st.markdown('<div class="map-label">Mapa de Passes</div>', unsafe_allow_html=True)
+        if (df["category"] == "passes").any():
+            img_pass, fig_pass = draw_pass_map(df)
+            plt.close(fig_pass)
+            st.image(img_pass, use_container_width=True)
+        else:
+            st.info("Sem passes no recorte selecionado.")
 
-    if categories is None or "passes" in categories:
-        img_pass, fig_pass = draw_pass_map(df)
-        maps.append(("Mapa de Passes", img_pass, fig_pass))
-        img_heat, fig_heat = draw_destination_heatmap(df)
-        maps.append(("Heatmap de Destino", img_heat, fig_heat))
-
-    cols = st.columns(len(maps))
-    for col, (label, img, fig) in zip(cols, maps):
-        with col:
-            plt.close(fig)
-            st.markdown(f'<div class="map-label">{label}</div>', unsafe_allow_html=True)
-            st.image(img, use_container_width=True)
+    with col_carry:
+        st.markdown('<div class="map-label">Mapa de Conduções</div>', unsafe_allow_html=True)
+        if (df["category"] == "ball-carries").any():
+            img_carry, fig_carry = draw_carry_map(df)
+            plt.close(fig_carry)
+            st.image(img_carry, use_container_width=True)
+        else:
+            st.info("Sem conduções no recorte selecionado.")
 
 
 # ── MAIN ─────────────────────────────────────────────────────
@@ -998,7 +927,7 @@ with tab_maps:
     if filtered.empty:
         st.info("Nenhuma ação para os filtros selecionados.")
     else:
-        render_maps(filtered, set(selected_categories))
+        render_maps(filtered)
 
 with tab_stats:
     render_player_cards(stats, PLAYER_TONE)
