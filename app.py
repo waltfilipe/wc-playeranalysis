@@ -136,9 +136,13 @@ ACTION_TYPE_LABELS = {
 
 
 # ── COORDINATE HELPERS ───────────────────────────────────────
-def wyscout_to_statsbomb(x: float, y: float) -> tuple[float, float]:
+def wyscout_to_statsbomb(x: float, y: float, flip_x: bool = False) -> tuple[float, float]:
     """Wyscout 0–100 → StatsBomb 120×80 (ataque da esquerda para a direita)."""
-    return x * FIELD_X / WYSCOUT_PITCH_SIZE, y * FIELD_Y / WYSCOUT_PITCH_SIZE
+    x_sb = x * FIELD_X / WYSCOUT_PITCH_SIZE
+    y_sb = y * FIELD_Y / WYSCOUT_PITCH_SIZE
+    if flip_x:
+        x_sb = FIELD_X - x_sb
+    return x_sb, y_sb
 
 
 def distance_to_goal(x: float, y: float) -> float:
@@ -465,7 +469,7 @@ def discover_csv_files(base_dir: Path | None = None) -> list[Path]:
     return sorted(root.glob("*.csv"))
 
 
-def load_player_csv(path: Path) -> pd.DataFrame:
+def load_player_csv(path: Path, flip_x: bool = False) -> pd.DataFrame:
     frame = pd.read_csv(path)
     required = {"category", "eventActionType", "start_x", "start_y"}
     missing = required - set(frame.columns)
@@ -474,11 +478,11 @@ def load_player_csv(path: Path) -> pd.DataFrame:
 
     rows = []
     for idx, row in frame.iterrows():
-        sx, sy = wyscout_to_statsbomb(float(row["start_x"]), float(row["start_y"]))
+        sx, sy = wyscout_to_statsbomb(float(row["start_x"]), float(row["start_y"]), flip_x)
         has_end = _has_coords(row, "end")
         ex = ey = np.nan
         if has_end:
-            ex, ey = wyscout_to_statsbomb(float(row["end_x"]), float(row["end_y"]))
+            ex, ey = wyscout_to_statsbomb(float(row["end_x"]), float(row["end_y"]), flip_x)
 
         rows.append(
             {
@@ -502,11 +506,11 @@ def load_player_csv(path: Path) -> pd.DataFrame:
     return enrich_with_xt_v3(pd.DataFrame(rows))
 
 
-def load_all_players(base_dir: Path | None = None) -> dict[str, pd.DataFrame]:
+def load_all_players(base_dir: Path | None = None, flip_x: bool = False) -> dict[str, pd.DataFrame]:
     players: dict[str, pd.DataFrame] = {}
     for path in discover_csv_files(base_dir):
         try:
-            players[path.stem] = load_player_csv(path)
+            players[path.stem] = load_player_csv(path, flip_x=flip_x)
         except Exception as exc:
             st.warning(f"Não foi possível carregar `{path.name}`: {exc}")
     return players
@@ -860,15 +864,6 @@ def render_maps(df: pd.DataFrame):
 
 
 # ── MAIN ─────────────────────────────────────────────────────
-players = load_all_players()
-
-if not players:
-    st.error(
-        "Nenhum arquivo `.csv` encontrado no diretório do app. "
-        "Adicione arquivos como `enzo.csv` com as colunas esperadas."
-    )
-    st.stop()
-
 st.sidebar.markdown(
     """
     <div style="text-align:center;">
@@ -880,6 +875,21 @@ st.sidebar.markdown(
 )
 st.sidebar.markdown("---")
 st.sidebar.caption("Impacto: xT Heurístico v3 · Progressivos: Wyscout")
+
+flip_pitch_x = st.sidebar.checkbox(
+    "Inverter orientação do campo (eixo X)",
+    value=True,
+    help="Ative se as ações aparecerem da direita para a esquerda.",
+)
+
+players = load_all_players(flip_x=flip_pitch_x)
+
+if not players:
+    st.error(
+        "Nenhum arquivo `.csv` encontrado no diretório do app. "
+        "Adicione arquivos como `enzo.csv` com as colunas esperadas."
+    )
+    st.stop()
 
 player_keys = list(players.keys())
 selected_player = st.sidebar.selectbox(
