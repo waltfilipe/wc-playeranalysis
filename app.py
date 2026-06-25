@@ -39,6 +39,13 @@ st.markdown(
         color: #c7cdda;
         margin: 0.6rem 0 0.25rem 0;
     }
+    div[data-testid="stImage"] img {
+        max-width: 680px;
+        width: 100%;
+        height: auto;
+        margin: 0 auto;
+        display: block;
+    }
     </style>
     """,
     unsafe_allow_html=True,
@@ -51,8 +58,9 @@ FINAL_THIRD_LINE_X = 80.0
 GOAL_X, GOAL_Y = 120.0, 40.0
 LANE_LEFT_MIN = 53.33
 LANE_RIGHT_MAX = 26.67
-FIG_W, FIG_H = 7.0, 4.7
-FIG_DPI = 180
+FIG_W, FIG_H = 5.4, 3.6
+FIG_DPI = 120
+MAP_DISPLAY_WIDTH = 680
 WYSCOUT_PITCH_SIZE = 100.0
 OPT_ATTACKING_TWO_THIRDS_X = 40.0
 WYSCOUT_PROG_OWN_HALF = 30.0
@@ -451,7 +459,7 @@ def draw_destination_heatmap(df: pd.DataFrame):
                     (df_s["x_end"] >= x0_)
                     & (df_s["x_end"] < x1_)
                     & (df_s["y_end"] >= y0)
-                    & (df_s["y_end"] < y1_)
+                    & (df_s["y_end"] < y1)
                 ).sum()
             )
         counts[cname] = arr
@@ -497,22 +505,24 @@ def draw_destination_heatmap(df: pd.DataFrame):
     return _save_fig(fig), fig
 
 
+def _show_map(img: Image.Image, label: str) -> None:
+    st.markdown(f'<div class="map-label">{label}</div>', unsafe_allow_html=True)
+    st.image(img, width=MAP_DISPLAY_WIDTH)
+
+
 def render_maps(df: pd.DataFrame, categories: set[str] | None = None):
     img_action, fig_action = draw_action_map(df, categories)
     plt.close(fig_action)
-    st.markdown('<div class="map-label">Mapa de Ações</div>', unsafe_allow_html=True)
-    st.image(img_action, use_container_width=True)
+    _show_map(img_action, "Mapa de Ações")
 
     if categories is None or "passes" in categories:
         img_pass, fig_pass = draw_pass_map(df)
         plt.close(fig_pass)
-        st.markdown('<div class="map-label">Mapa de Passes</div>', unsafe_allow_html=True)
-        st.image(img_pass, use_container_width=True)
+        _show_map(img_pass, "Mapa de Passes")
 
         img_heat, fig_heat = draw_destination_heatmap(df)
         plt.close(fig_heat)
-        st.markdown('<div class="map-label">Heatmap de Destino (Passes)</div>', unsafe_allow_html=True)
-        st.image(img_heat, use_container_width=True)
+        _show_map(img_heat, "Heatmap de Destino (Passes)")
 
 
 # ── MAIN ─────────────────────────────────────────────────────
