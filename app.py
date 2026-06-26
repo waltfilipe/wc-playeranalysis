@@ -60,7 +60,7 @@ ARROW_HEADLENGTH = 1.15
 ARROW_ALPHA = 0.68
 ARROW_ALPHA_EMPH = 0.82
 ALL_MATCHES_LABEL = "All Matches"
-DATA_CACHE_VERSION = 13
+DATA_CACHE_VERSION = 14
 XT_ZONE_COLS = 3
 XT_ZONE_ROWS = 2
 NX_XT = 16
@@ -115,7 +115,7 @@ XT_V5_MAX_DELTA_BOX = 0.52
 # xT Heurístico v3.1 — transições suaves e salto reduzido na linha de meio
 XT_MODEL_HEURISTIC_V31 = "heuristic_v31"
 XT_V31_ZONE_BLEND_WIDTH = 48.0
-XT_V31_LAT_DISC_MAX = 0.03
+XT_V31_LAT_DISC_MAX = 0.06
 XT_V31_LAT_GATE_X = HALF_LINE_X
 XT_V31_GAUSS_SIGMA_X = 3.5
 XT_V31_GAUSS_SIGMA_Y = 0.0
@@ -1372,7 +1372,7 @@ def render_xt_model_comparison(
             "xt_end_col": "xt_end_v31",
             "desc": (
                 "Blend amplo (48 m) + gaussiana só em X (σx=3.5) + rampa 5.0/7.8 pp por coluna. "
-                "Penalização lateral suave (3%) apenas no campo ofensivo (x≥60)."
+                "Penalização lateral (6%) apenas no campo ofensivo (x≥60)."
             ),
         },
     ]
