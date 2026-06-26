@@ -60,7 +60,7 @@ ARROW_HEADLENGTH = 1.15
 ARROW_ALPHA = 0.68
 ARROW_ALPHA_EMPH = 0.82
 ALL_MATCHES_LABEL = "All Matches"
-DATA_CACHE_VERSION = 13
+DATA_CACHE_VERSION = 14
 XT_ZONE_COLS = 3
 XT_ZONE_ROWS = 2
 NX_XT = 16
@@ -1372,7 +1372,7 @@ def render_xt_model_comparison(
             "xt_end_col": "xt_end_v31",
             "desc": (
                 "Blend amplo (48 m) + gaussiana só em X (σx=3.5) + rampa 5.0/7.8 pp por coluna. "
-                "Penalização lateral suave (3%) apenas no campo ofensivo (x≥60)."
+                "Penalização lateral (6%) apenas no campo ofensivo (x≥60)."
             ),
         },
     ]
