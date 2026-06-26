@@ -60,12 +60,11 @@ ARROW_HEADLENGTH = 1.15
 ARROW_ALPHA = 0.68
 ARROW_ALPHA_EMPH = 0.82
 ALL_MATCHES_LABEL = "All Matches"
-DATA_CACHE_VERSION = 9
+DATA_CACHE_VERSION = 10
 XT_ZONE_COLS = 3
 XT_ZONE_ROWS = 2
 NX_XT = 16
 NY_XT = 12
-NX_XT_V3S = 18
 XT_GRID_CMAP = LinearSegmentedColormap.from_list(
     "xt_grid", ["#1a1a2e", "#3b82f6", "#fbbf24", "#ef4444"]
 )
@@ -113,30 +112,24 @@ XT_V5_MAX_DELTA_MID = 0.36
 XT_V5_MAX_DELTA_ATT = 0.42
 XT_V5_MAX_DELTA_BOX = 0.52
 
-# xT Heurístico v3c — conservador (0–0.5), transições mais suaves
-XT_MODEL_HEURISTIC_V3C = "heuristic_v3c"
-XT_V3C_SURFACE_MAX = 0.50
-XT_V3C_DEF_MAX = 0.125
-XT_V3C_MID_MAX = 0.30
-XT_V3C_ATT_BYLINE = 0.47
-XT_V3C_ZONE_BLEND_WIDTH = 42.0
-XT_V3C_LAT_DISC_MAX = 0.08
-XT_V3C_CENTRAL_PREMIUM = 0.03
-XT_V3C_CORNER_PENALTY = 0.05
-XT_V3C_MAX_DELTA_DEF = 0.14
-XT_V3C_MAX_DELTA_MID = 0.18
-XT_V3C_MAX_DELTA_ATT = 0.21
-XT_V3C_MAX_DELTA_BOX = 0.26
+# xT Heurístico v3g — suavização gaussiana da superfície v3
+XT_MODEL_HEURISTIC_V3G = "heuristic_v3g"
+XT_V3G_GAUSS_SIGMA_X = 5.0
+XT_V3G_GAUSS_SIGMA_Y = 3.0
+XT_V3G_COL_SMOOTH_KERNEL = (0.22, 0.56, 0.22)
+XT_V3G_MAX_COL_STEP = 0.055
 
-# xT Heurístico v3s — idêntico ao v3c, grade de exibição 18×12
-XT_MODEL_HEURISTIC_V3S = "heuristic_v3s"
+# xT Heurístico v3w — zonas com blend amplo (transições longas)
+XT_MODEL_HEURISTIC_V3W = "heuristic_v3w"
+XT_V3W_ZONE_BLEND_WIDTH = 52.0
+XT_V3W_LAT_DISC_MAX = 0.11
+XT_V3W_COL_SMOOTH_KERNEL = (0.22, 0.56, 0.22)
+XT_V3W_MAX_COL_STEP = 0.060
 
-# xT Heurístico v3q — grade 18×12 agregada em 24 quadrantes 6×4 (média)
-XT_MODEL_HEURISTIC_V3Q = "heuristic_v3q"
-NX_XT_V3Q = 6
-NY_XT_V3Q = 4
-# Alvos por coluna (A–F) no mapa 6×4, em fração 0–1
-V3Q_COLUMN_TARGETS = (0.03, 0.10, 0.17, 0.24, 0.32, 0.42)
+# xT Heurístico v3r — grade com rampa limitada entre colunas adjacentes
+XT_MODEL_HEURISTIC_V3R = "heuristic_v3r"
+XT_V3R_MAX_COL_STEP = 0.045
+XT_V3R_COL_SMOOTH_KERNEL = (0.20, 0.60, 0.20)
 
 CARD_TITLE_TEXT = "14px"
 CARD_LABEL_TEXT = "16px"
@@ -304,16 +297,6 @@ def compute_heuristic_v3_xt_grid(
 
 
 @st.cache_data(show_spinner=False)
-def compute_heuristic_v3c_xt_grid(
-    n_x: int = NX_XT, n_y: int = NY_XT,
-) -> np.ndarray:
-    """16×12 display grid sampled from the v3c fine threat surface."""
-    fine = compute_heuristic_v3c_fine_grid()
-    grid = zone_xt_means(fine, n_x=n_x, n_y=n_y)
-    return _enforce_row_monotonic_x(grid)
-
-
-@st.cache_data(show_spinner=False)
 def compute_heuristic_v3_fine_grid(nx: int = XT_V3_FINE_NX, ny: int = XT_V3_FINE_NY) -> np.ndarray:
     xe = np.linspace(0.0, FIELD_X, nx)
     ye = np.linspace(0.0, FIELD_Y, ny)
@@ -401,41 +384,32 @@ def apply_heuristic_v3_xt(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
-# ── xT HEURÍSTICO v3c (conservador) ──────────────────────────
-def _location_factor_v3c(x: np.ndarray, y: np.ndarray) -> np.ndarray:
-    lat = _lateral_relative_position(y)
-    depth = np.clip(
-        (x - OPT_ATTACKING_TWO_THIRDS_X) / (FIELD_X - OPT_ATTACKING_TWO_THIRDS_X),
-        0.0,
-        1.0,
-    )
-    zone_gate = _smootherstep(depth)
-    max_discount = XT_V3C_LAT_DISC_MAX * zone_gate
-    lateral_curve = _smootherstep(lat ** XT_V3_LAT_CURVE_POWER)
-    return 1.0 - max_discount * lateral_curve
+# ── xT HEURÍSTICO v3g / v3w / v3r (transições graduais) ─────
+def _gaussian_kernel_1d(sigma: float) -> np.ndarray:
+    radius = max(1, int(np.ceil(3.0 * sigma)))
+    xs = np.arange(-radius, radius + 1, dtype=float)
+    kernel = np.exp(-0.5 * (xs / sigma) ** 2)
+    return kernel / kernel.sum()
 
 
-def _v4_xg_finishing_factor_v3c(x: np.ndarray, y: np.ndarray) -> np.ndarray:
-    box_gate = _v4_box_gate(x)
-    cent = _centrality(y)
-    lat = _lateral_relative_position(y)
-    central_bonus = XT_V3C_CENTRAL_PREMIUM * box_gate * _smootherstep(cent)
-    wide_in_box = box_gate * _smootherstep(np.clip((lat - XT_V4_CORNER_LAT_ON) / 0.42, 0.0, 1.0))
-    wide_discount = XT_V3C_CORNER_PENALTY * wide_in_box
-    return np.clip(1.0 + central_bonus - wide_discount, 0.97, 1.03)
+def _gaussian_smooth_2d(grid: np.ndarray, sigma_x: float, sigma_y: float) -> np.ndarray:
+    kx = _gaussian_kernel_1d(sigma_x)
+    ky = _gaussian_kernel_1d(sigma_y)
+    tmp = np.apply_along_axis(lambda row: np.convolve(row, kx, mode="same"), axis=1, arr=grid)
+    return np.apply_along_axis(lambda row: np.convolve(row, ky, mode="same"), axis=0, arr=tmp)
 
 
-def _map_zonal_threat_v3c_smooth(x: np.ndarray) -> np.ndarray:
-    """Mesma lógica de zonas do v3, com blend mais largo e curvas mais suaves."""
-    blend = XT_V3C_ZONE_BLEND_WIDTH
+def _map_zonal_threat_v3_wide(x: np.ndarray) -> np.ndarray:
+    """Mesma estrutura zonal do v3, com blend mais amplo e curvas smootherstep."""
+    blend = XT_V3W_ZONE_BLEND_WIDTH
     x = np.clip(x, 0.0, FIELD_X)
-    threat_def = XT_V3C_DEF_MAX * _smootherstep(np.clip(x / OPT_ATTACKING_TWO_THIRDS_X, 0.0, 1.0))
+    threat_def = XT_V3_DEF_MAX * _smootherstep(np.clip(x / OPT_ATTACKING_TWO_THIRDS_X, 0.0, 1.0))
     mid_span = max(FINAL_THIRD_LINE_X - OPT_ATTACKING_TWO_THIRDS_X, 1.0)
     mid_t = np.clip((x - OPT_ATTACKING_TWO_THIRDS_X) / mid_span, 0.0, 1.0)
-    threat_mid = XT_V3C_DEF_MAX + (XT_V3C_MID_MAX - XT_V3C_DEF_MAX) * _smootherstep(mid_t)
+    threat_mid = XT_V3_DEF_MAX + (XT_V3_MID_MAX - XT_V3_DEF_MAX) * _smootherstep(mid_t)
     att_span = max(FIELD_X - FINAL_THIRD_LINE_X, 1.0)
     att_t = np.clip((x - FINAL_THIRD_LINE_X) / att_span, 0.0, 1.0)
-    threat_att = XT_V3C_MID_MAX + (XT_V3C_ATT_BYLINE - XT_V3C_MID_MAX) * _smootherstep(att_t)
+    threat_att = XT_V3_MID_MAX + (XT_V3_ATT_BYLINE - XT_V3_MID_MAX) * _smootherstep(att_t)
     w_def = 1.0 - _smootherstep(np.clip((x - (OPT_ATTACKING_TWO_THIRDS_X - blend)) / blend, 0.0, 1.0))
     w_att = _smootherstep(np.clip((x - (FINAL_THIRD_LINE_X - blend)) / blend, 0.0, 1.0))
     w_mid = np.clip(1.0 - w_def - w_att, 0.0, 1.0)
@@ -443,172 +417,156 @@ def _map_zonal_threat_v3c_smooth(x: np.ndarray) -> np.ndarray:
     return (w_def * threat_def + w_mid * threat_mid + w_att * threat_att) / w_sum
 
 
-def _build_heuristic_v3c_threat_surface(Xc: np.ndarray, Yc: np.ndarray) -> np.ndarray:
-    zonal = _map_zonal_threat_v3c_smooth(Xc)
-    surface = zonal * _location_factor_v3c(Xc, Yc) * _v4_xg_finishing_factor_v3c(Xc, Yc)
-    surface = np.clip(surface, 0.0, XT_V3C_SURFACE_MAX)
-    return _enforce_row_monotonic_x(surface)
-
-
-@st.cache_data(show_spinner=False)
-def compute_heuristic_v3c_fine_grid(nx: int = XT_V3_FINE_NX, ny: int = XT_V3_FINE_NY) -> np.ndarray:
-    xe = np.linspace(0.0, FIELD_X, nx)
-    ye = np.linspace(0.0, FIELD_Y, ny)
-    Xc, Yc = np.meshgrid(xe, ye)
-    return _build_heuristic_v3c_threat_surface(Xc, Yc)
-
-
-def _v3c_zone_max_pass_delta(x_start: float) -> float:
-    x = float(np.clip(x_start, 0.0, FIELD_X))
-    control_points = [
-        (0.0, XT_V3C_MAX_DELTA_DEF),
-        (OPT_ATTACKING_TWO_THIRDS_X, XT_V3C_MAX_DELTA_MID),
-        (FINAL_THIRD_LINE_X, XT_V3C_MAX_DELTA_ATT),
-        (XT_V4_BOX_X_START, XT_V3C_MAX_DELTA_BOX),
-        (FIELD_X, XT_V3C_MAX_DELTA_BOX),
-    ]
-    for idx in range(len(control_points) - 1):
-        x0, cap0 = control_points[idx]
-        x1, cap1 = control_points[idx + 1]
-        if x <= x1:
-            if x1 <= x0:
-                return cap1
-            t = float(_smootherstep(np.array([(x - x0) / (x1 - x0)]))[0])
-            return cap0 + (cap1 - cap0) * t
-    return control_points[-1][1]
-
-
-def _adjust_heuristic_v3c_pass_delta(row) -> float:
-    if not row.is_won:
-        return 0.0
-    raw = float(row.xt_end_v3c - row.xt_start_v3c)
-    if raw >= 0:
-        adjusted = raw * _v3_short_pass_multiplier(row.pass_distance)
-        return min(adjusted, _v3c_zone_max_pass_delta(row.x_start))
-    lat_start = _lateral_frac(row.y_start)
-    lat_end = _lateral_frac(row.y_end)
-    if row.x_start < XT_V3_NEG_RECYCLE_X_MAX:
-        adjusted = raw * (XT_V3_NEG_PENALTY_FACTOR if lat_end < lat_start else 1.0)
-    else:
-        adjusted = raw
-    if (
-        row.x_start < XT_V3_PRESSURE_X_MAX
-        and lat_start > XT_V3_WIDE_FRAC
-        and lat_end < lat_start - 0.12
-    ):
-        adjusted += XT_V3_PRESSURE_ESCAPE_BONUS * 0.5
-    return adjusted
-
-
-def apply_heuristic_v3c_xt(df: pd.DataFrame) -> pd.DataFrame:
-    fine = compute_heuristic_v3c_fine_grid()
-    out = df.copy()
-    out["xt_start_v3c"] = out.apply(
-        lambda r: xt_value_bilinear(r["x_start"], r["y_start"], fine), axis=1
+def _location_factor_v3w(x: np.ndarray, y: np.ndarray) -> np.ndarray:
+    lat = _lateral_relative_position(y)
+    depth = np.clip(
+        (x - OPT_ATTACKING_TWO_THIRDS_X) / (FIELD_X - OPT_ATTACKING_TWO_THIRDS_X),
+        0.0,
+        1.0,
     )
-    out["xt_end_v3c"] = out.apply(
-        lambda r: xt_value_bilinear(r["x_end"], r["y_end"], fine), axis=1
-    )
-    out["delta_xt_v3c"] = out.apply(_adjust_heuristic_v3c_pass_delta, axis=1)
+    zone_gate = _smootherstep(depth)
+    max_discount = XT_V3W_LAT_DISC_MAX * zone_gate
+    lateral_curve = _smootherstep(lat ** XT_V3_LAT_CURVE_POWER)
+    return 1.0 - max_discount * lateral_curve
+
+
+def _build_heuristic_v3g_threat_surface(Xc: np.ndarray, Yc: np.ndarray) -> np.ndarray:
+    zonal = _map_zonal_threat_v3_smooth(Xc)
+    surface = zonal * _location_factor_v3(Xc, Yc) * _v4_xg_finishing_factor(Xc, Yc)
+    surface = np.clip(surface, 0.0, XT_V3_SURFACE_MAX)
+    smoothed = _gaussian_smooth_2d(surface, XT_V3G_GAUSS_SIGMA_X, XT_V3G_GAUSS_SIGMA_Y)
+    return np.clip(smoothed, 0.0, XT_V3_SURFACE_MAX)
+
+
+def _build_heuristic_v3w_threat_surface(Xc: np.ndarray, Yc: np.ndarray) -> np.ndarray:
+    zonal = _map_zonal_threat_v3_wide(Xc)
+    surface = zonal * _location_factor_v3w(Xc, Yc) * _v4_xg_finishing_factor(Xc, Yc)
+    return np.clip(surface, 0.0, XT_V3_SURFACE_MAX)
+
+
+def _build_heuristic_v3r_threat_surface(Xc: np.ndarray, Yc: np.ndarray) -> np.ndarray:
+    """v3 sem monotonicidade forçada — base contínua para ações e grade."""
+    zonal = _map_zonal_threat_v3_smooth(Xc)
+    surface = zonal * _location_factor_v3(Xc, Yc) * _v4_xg_finishing_factor(Xc, Yc)
+    return np.clip(surface, 0.0, XT_V3_SURFACE_MAX)
+
+
+def _smooth_columns_1d(row: np.ndarray, kernel: tuple[float, ...]) -> np.ndarray:
+    k = np.asarray(kernel, dtype=float)
+    k = k / k.sum()
+    pad = len(k) // 2
+    padded = np.pad(row, (pad, pad), mode="edge")
+    return np.convolve(padded, k, mode="valid")
+
+
+def _limit_adjacent_column_step(grid: np.ndarray, max_step: float) -> np.ndarray:
+    """Cap column-to-column jumps while preserving attack-direction growth."""
+    out = grid.copy()
+    for iy in range(out.shape[0]):
+        row = out[iy].copy()
+        for ix in range(1, row.shape[0]):
+            lo = row[ix - 1]
+            hi = lo + max_step
+            if row[ix] > hi:
+                row[ix] = hi
+            elif row[ix] < lo:
+                row[ix] = lo
+        out[iy] = row
     return out
 
 
-# ── xT HEURÍSTICO v3s (= v3c, grade 18×12) ───────────────────
-def apply_heuristic_v3s_xt(df: pd.DataFrame) -> pd.DataFrame:
-    """Same xT values as v3c; separate columns for 18×12 grid comparison."""
-    v3c = apply_heuristic_v3c_xt(df)
-    out = df.copy()
-    out["xt_start_v3s"] = v3c["xt_start_v3c"].values
-    out["xt_end_v3s"] = v3c["xt_end_v3c"].values
-    out["delta_xt_v3s"] = v3c["delta_xt_v3c"].values
-    return out
-
-
-@st.cache_data(show_spinner=False)
-def compute_heuristic_v3s_xt_grid(
-    n_x: int = NX_XT_V3S, n_y: int = NY_XT,
+def _sample_display_grid(
+    fine: np.ndarray,
+    n_x: int = NX_XT,
+    n_y: int = NY_XT,
+    *,
+    post_process=None,
 ) -> np.ndarray:
-    """18×12 display grid from the v3c threat surface."""
-    fine = compute_heuristic_v3c_fine_grid()
     grid = zone_xt_means(fine, n_x=n_x, n_y=n_y)
-    return _enforce_row_monotonic_x(grid)
-
-
-def pool_grid_average(grid: np.ndarray, out_cols: int, out_rows: int) -> np.ndarray:
-    """Average fine grid cells into out_cols × out_rows mega-quadrants."""
-    ny, nx = grid.shape
-    block_w = nx // out_cols
-    block_h = ny // out_rows
-    pooled = np.zeros((out_rows, out_cols), dtype=float)
-    for iy in range(out_rows):
-        for ix in range(out_cols):
-            y0, y1 = iy * block_h, (iy + 1) * block_h
-            x0, x1 = ix * block_w, (ix + 1) * block_w
-            pooled[iy, ix] = float(grid[y0:y1, x0:x1].mean())
-    return pooled
-
-
-def _build_v3q_calibrated_grid_18x12() -> np.ndarray:
-    """18×12 grid: each 3-column band (A–F) set to the target column xT."""
-    grid = np.zeros((NY_XT, NX_XT_V3S), dtype=float)
-    cols_per_letter = NX_XT_V3S // NX_XT_V3Q
-    for letter_ix, target in enumerate(V3Q_COLUMN_TARGETS):
-        x0 = letter_ix * cols_per_letter
-        x1 = x0 + cols_per_letter
-        grid[:, x0:x1] = target
+    if post_process is not None:
+        grid = post_process(grid)
     return grid
 
 
-# ── xT HEURÍSTICO v3q (18×12 → 24 quadrantes 6×4) ─────────────
 @st.cache_data(show_spinner=False)
-def _v3q_base_grid_18x12(_cache_version: int = DATA_CACHE_VERSION) -> np.ndarray:
-    """Calibrated 18×12 surface; columns A–F map to V3Q_COLUMN_TARGETS."""
-    return _build_v3q_calibrated_grid_18x12()
-
-
-@st.cache_data(show_spinner=False)
-def compute_heuristic_v3q_pooled_grid(_cache_version: int = DATA_CACHE_VERSION) -> np.ndarray:
-    """6×4 grid (24 quadrantes): each cell is the mean of a 3×3 block from 18×12."""
-    base = _v3q_base_grid_18x12(_cache_version)
-    return pool_grid_average(base, out_cols=NX_XT_V3Q, out_rows=NY_XT_V3Q)
-
-
-def _build_heuristic_v3q_threat_surface(Xc: np.ndarray, Yc: np.ndarray) -> np.ndarray:
-    pooled = compute_heuristic_v3q_pooled_grid()
-    ix = np.minimum(np.floor(Xc / (FIELD_X / NX_XT_V3Q)).astype(int), NX_XT_V3Q - 1)
-    iy = np.minimum(np.floor(Yc / (FIELD_Y / NY_XT_V3Q)).astype(int), NY_XT_V3Q - 1)
-    surface = pooled[iy, ix]
-    return _enforce_row_monotonic_x(np.clip(surface, 0.0, XT_V3C_SURFACE_MAX))
-
-
-@st.cache_data(show_spinner=False)
-def compute_heuristic_v3q_fine_grid(
-    nx: int = XT_V3_FINE_NX,
-    ny: int = XT_V3_FINE_NY,
-    _cache_version: int = DATA_CACHE_VERSION,
+def compute_heuristic_v3g_fine_grid(
+    nx: int = XT_V3_FINE_NX, ny: int = XT_V3_FINE_NY,
 ) -> np.ndarray:
     xe = np.linspace(0.0, FIELD_X, nx)
     ye = np.linspace(0.0, FIELD_Y, ny)
     Xc, Yc = np.meshgrid(xe, ye)
-    return _build_heuristic_v3q_threat_surface(Xc, Yc)
+    return _build_heuristic_v3g_threat_surface(Xc, Yc)
 
 
 @st.cache_data(show_spinner=False)
-def compute_heuristic_v3q_xt_grid(
-    _cache_version: int = DATA_CACHE_VERSION,
+def compute_heuristic_v3w_fine_grid(
+    nx: int = XT_V3_FINE_NX, ny: int = XT_V3_FINE_NY,
 ) -> np.ndarray:
-    """Display grid: 6×4 pooled directly from the 18×12 v3c surface."""
-    grid = compute_heuristic_v3q_pooled_grid(_cache_version)
-    return _enforce_row_monotonic_x(grid)
+    xe = np.linspace(0.0, FIELD_X, nx)
+    ye = np.linspace(0.0, FIELD_Y, ny)
+    Xc, Yc = np.meshgrid(xe, ye)
+    return _build_heuristic_v3w_threat_surface(Xc, Yc)
 
 
-def _adjust_heuristic_v3q_pass_delta(row) -> float:
+@st.cache_data(show_spinner=False)
+def compute_heuristic_v3r_fine_grid(
+    nx: int = XT_V3_FINE_NX, ny: int = XT_V3_FINE_NY,
+) -> np.ndarray:
+    xe = np.linspace(0.0, FIELD_X, nx)
+    ye = np.linspace(0.0, FIELD_Y, ny)
+    Xc, Yc = np.meshgrid(xe, ye)
+    return _build_heuristic_v3r_threat_surface(Xc, Yc)
+
+
+@st.cache_data(show_spinner=False)
+def compute_heuristic_v3g_xt_grid(n_x: int = NX_XT, n_y: int = NY_XT) -> np.ndarray:
+    fine = compute_heuristic_v3g_fine_grid()
+
+    def _post(grid: np.ndarray) -> np.ndarray:
+        smoothed = np.array([
+            _smooth_columns_1d(grid[iy], XT_V3G_COL_SMOOTH_KERNEL)
+            for iy in range(grid.shape[0])
+        ])
+        return _limit_adjacent_column_step(smoothed, XT_V3G_MAX_COL_STEP)
+
+    return _sample_display_grid(fine, n_x, n_y, post_process=_post)
+
+
+@st.cache_data(show_spinner=False)
+def compute_heuristic_v3w_xt_grid(n_x: int = NX_XT, n_y: int = NY_XT) -> np.ndarray:
+    fine = compute_heuristic_v3w_fine_grid()
+
+    def _post(grid: np.ndarray) -> np.ndarray:
+        smoothed = np.array([
+            _smooth_columns_1d(grid[iy], XT_V3W_COL_SMOOTH_KERNEL)
+            for iy in range(grid.shape[0])
+        ])
+        return _limit_adjacent_column_step(smoothed, XT_V3W_MAX_COL_STEP)
+
+    return _sample_display_grid(fine, n_x, n_y, post_process=_post)
+
+
+@st.cache_data(show_spinner=False)
+def compute_heuristic_v3r_xt_grid(n_x: int = NX_XT, n_y: int = NY_XT) -> np.ndarray:
+    fine = compute_heuristic_v3r_fine_grid()
+
+    def _post(grid: np.ndarray) -> np.ndarray:
+        smoothed = np.array([
+            _smooth_columns_1d(grid[iy], XT_V3R_COL_SMOOTH_KERNEL)
+            for iy in range(grid.shape[0])
+        ])
+        return _limit_adjacent_column_step(smoothed, XT_V3R_MAX_COL_STEP)
+
+    return _sample_display_grid(fine, n_x, n_y, post_process=_post)
+
+
+def _adjust_heuristic_v3_variant_pass_delta(row, start_col: str, end_col: str) -> float:
     if not row.is_won:
         return 0.0
-    raw = float(row.xt_end_v3q - row.xt_start_v3q)
+    raw = float(getattr(row, end_col) - getattr(row, start_col))
     if raw >= 0:
         adjusted = raw * _v3_short_pass_multiplier(row.pass_distance)
-        return min(adjusted, _v3c_zone_max_pass_delta(row.x_start))
+        return min(adjusted, _v3_zone_max_pass_delta(row.x_start))
     lat_start = _lateral_frac(row.y_start)
     lat_end = _lateral_frac(row.y_end)
     if row.x_start < XT_V3_NEG_RECYCLE_X_MAX:
@@ -620,21 +578,45 @@ def _adjust_heuristic_v3q_pass_delta(row) -> float:
         and lat_start > XT_V3_WIDE_FRAC
         and lat_end < lat_start - 0.12
     ):
-        adjusted += XT_V3_PRESSURE_ESCAPE_BONUS * 0.5
+        adjusted += XT_V3_PRESSURE_ESCAPE_BONUS
     return adjusted
 
 
-def apply_heuristic_v3q_xt(df: pd.DataFrame) -> pd.DataFrame:
-    fine = compute_heuristic_v3q_fine_grid()
+def _apply_heuristic_v3_variant_xt(
+    df: pd.DataFrame, fine_fn, prefix: str,
+) -> pd.DataFrame:
+    fine = fine_fn()
     out = df.copy()
-    out["xt_start_v3q"] = out.apply(
+    start_col, end_col, delta_col = f"xt_start_{prefix}", f"xt_end_{prefix}", f"delta_xt_{prefix}"
+    out[start_col] = out.apply(
         lambda r: xt_value_bilinear(r["x_start"], r["y_start"], fine), axis=1
     )
-    out["xt_end_v3q"] = out.apply(
+    out[end_col] = out.apply(
         lambda r: xt_value_bilinear(r["x_end"], r["y_end"], fine), axis=1
     )
-    out["delta_xt_v3q"] = out.apply(_adjust_heuristic_v3q_pass_delta, axis=1)
+    out[delta_col] = out.apply(
+        lambda r: _adjust_heuristic_v3_variant_pass_delta(r, start_col, end_col), axis=1
+    )
     return out
+
+
+def apply_heuristic_v3g_xt(df: pd.DataFrame) -> pd.DataFrame:
+    return _apply_heuristic_v3_variant_xt(df, compute_heuristic_v3g_fine_grid, "v3g")
+
+
+def apply_heuristic_v3w_xt(df: pd.DataFrame) -> pd.DataFrame:
+    return _apply_heuristic_v3_variant_xt(df, compute_heuristic_v3w_fine_grid, "v3w")
+
+
+def apply_heuristic_v3r_xt(df: pd.DataFrame) -> pd.DataFrame:
+    return _apply_heuristic_v3_variant_xt(df, compute_heuristic_v3r_fine_grid, "v3r")
+
+
+def _max_adjacent_col_jump_pct(grid: np.ndarray) -> float:
+    if grid.shape[1] < 2:
+        return 0.0
+    jumps = np.abs(np.diff(grid, axis=1))
+    return float(jumps.max() * 100.0)
 
 
 def classify_xt_progressive_v3_adjusted(
@@ -718,9 +700,9 @@ def enrich_with_xt_v3(df: pd.DataFrame) -> pd.DataFrame:
 
     for col in (
         "xt_start", "xt_end", "delta_xt",
-        "xt_start_v3c", "xt_end_v3c", "delta_xt_v3c",
-        "xt_start_v3s", "xt_end_v3s", "delta_xt_v3s",
-        "xt_start_v3q", "xt_end_v3q", "delta_xt_v3q",
+        "xt_start_v3g", "xt_end_v3g", "delta_xt_v3g",
+        "xt_start_v3w", "xt_end_v3w", "delta_xt_v3w",
+        "xt_start_v3r", "xt_end_v3r", "delta_xt_v3r",
     ):
         out[col] = 0.0
     out["progressive"] = False
@@ -738,19 +720,19 @@ def enrich_with_xt_v3(df: pd.DataFrame) -> pd.DataFrame:
         ["xt_start", "xt_end", "delta_xt"]
     ].values
 
-    xt_df_v3c = apply_heuristic_v3c_xt(out.loc[xt_mask].copy())
-    out.loc[xt_mask, ["xt_start_v3c", "xt_end_v3c", "delta_xt_v3c"]] = xt_df_v3c[
-        ["xt_start_v3c", "xt_end_v3c", "delta_xt_v3c"]
+    xt_df_v3g = apply_heuristic_v3g_xt(out.loc[xt_mask].copy())
+    out.loc[xt_mask, ["xt_start_v3g", "xt_end_v3g", "delta_xt_v3g"]] = xt_df_v3g[
+        ["xt_start_v3g", "xt_end_v3g", "delta_xt_v3g"]
     ].values
 
-    xt_df_v3s = apply_heuristic_v3s_xt(out.loc[xt_mask].copy())
-    out.loc[xt_mask, ["xt_start_v3s", "xt_end_v3s", "delta_xt_v3s"]] = xt_df_v3s[
-        ["xt_start_v3s", "xt_end_v3s", "delta_xt_v3s"]
+    xt_df_v3w = apply_heuristic_v3w_xt(out.loc[xt_mask].copy())
+    out.loc[xt_mask, ["xt_start_v3w", "xt_end_v3w", "delta_xt_v3w"]] = xt_df_v3w[
+        ["xt_start_v3w", "xt_end_v3w", "delta_xt_v3w"]
     ].values
 
-    xt_df_v3q = apply_heuristic_v3q_xt(out.loc[xt_mask].copy())
-    out.loc[xt_mask, ["xt_start_v3q", "xt_end_v3q", "delta_xt_v3q"]] = xt_df_v3q[
-        ["xt_start_v3q", "xt_end_v3q", "delta_xt_v3q"]
+    xt_df_v3r = apply_heuristic_v3r_xt(out.loc[xt_mask].copy())
+    out.loc[xt_mask, ["xt_start_v3r", "xt_end_v3r", "delta_xt_v3r"]] = xt_df_v3r[
+        ["xt_start_v3r", "xt_end_v3r", "delta_xt_v3r"]
     ].values
 
     pass_mask = out["category"] == "passes"
@@ -771,39 +753,28 @@ def enrich_with_xt_v3(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def ensure_xt_model_columns(df: pd.DataFrame) -> pd.DataFrame:
-    """Backfill v3c/v3s columns when serving cached frames from older app versions."""
+    """Backfill variant xT columns when serving cached frames from older app versions."""
     if df.empty:
         return df
 
     out = df.copy()
     xt_mask = out["category"].isin(["passes", "ball-carries"]) & out["has_end"]
 
-    if "delta_xt_v3c" not in out.columns:
-        for col in ("xt_start_v3c", "xt_end_v3c", "delta_xt_v3c"):
-            out[col] = 0.0
-        if xt_mask.any():
-            xt_df_v3c = apply_heuristic_v3c_xt(out.loc[xt_mask].copy())
-            out.loc[xt_mask, ["xt_start_v3c", "xt_end_v3c", "delta_xt_v3c"]] = xt_df_v3c[
-                ["xt_start_v3c", "xt_end_v3c", "delta_xt_v3c"]
-            ].values
-
-    if "delta_xt_v3s" not in out.columns:
-        for col in ("xt_start_v3s", "xt_end_v3s", "delta_xt_v3s"):
-            out[col] = 0.0
-        if xt_mask.any():
-            xt_df_v3s = apply_heuristic_v3s_xt(out.loc[xt_mask].copy())
-            out.loc[xt_mask, ["xt_start_v3s", "xt_end_v3s", "delta_xt_v3s"]] = xt_df_v3s[
-                ["xt_start_v3s", "xt_end_v3s", "delta_xt_v3s"]
-            ].values
-
-    if "delta_xt_v3q" not in out.columns:
-        for col in ("xt_start_v3q", "xt_end_v3q", "delta_xt_v3q"):
-            out[col] = 0.0
-        if xt_mask.any():
-            xt_df_v3q = apply_heuristic_v3q_xt(out.loc[xt_mask].copy())
-            out.loc[xt_mask, ["xt_start_v3q", "xt_end_v3q", "delta_xt_v3q"]] = xt_df_v3q[
-                ["xt_start_v3q", "xt_end_v3q", "delta_xt_v3q"]
-            ].values
+    variant_specs = [
+        ("v3g", apply_heuristic_v3g_xt),
+        ("v3w", apply_heuristic_v3w_xt),
+        ("v3r", apply_heuristic_v3r_xt),
+    ]
+    for prefix, apply_fn in variant_specs:
+        delta_col = f"delta_xt_{prefix}"
+        if delta_col not in out.columns:
+            for col in (f"xt_start_{prefix}", f"xt_end_{prefix}", delta_col):
+                out[col] = 0.0
+            if xt_mask.any():
+                xt_df = apply_fn(out.loc[xt_mask].copy())
+                out.loc[xt_mask, [f"xt_start_{prefix}", f"xt_end_{prefix}", delta_col]] = xt_df[
+                    [f"xt_start_{prefix}", f"xt_end_{prefix}", delta_col]
+                ].values
 
     return out
 
@@ -1449,74 +1420,94 @@ def render_comparison(player_data: dict[str, pd.DataFrame], match_selection: str
 def render_xt_model_comparison(
     player_data: dict[str, pd.DataFrame], match_selection: str
 ) -> None:
-    """Compare xT v3, v3c, v3s and v3q threat surfaces and top ΔxT maps."""
+    """Compare xT v3 original vs gradual-transition variants (v3g, v3w, v3r)."""
     match_label = _match_scope_label(match_selection)
+
+    compare_models = [
+        {
+            "key": "v3",
+            "label": "Heurístico v3",
+            "grid_fn": compute_heuristic_v3_xt_grid,
+            "fine_fn": compute_heuristic_v3_fine_grid,
+            "vmax": XT_V3_SURFACE_MAX,
+            "delta_col": "delta_xt",
+            "xt_end_col": "xt_end",
+            "desc": "Original — zonas com blend 22 m e monotonicidade por linha.",
+        },
+        {
+            "key": "v3g",
+            "label": "Heurístico v3g",
+            "grid_fn": compute_heuristic_v3g_xt_grid,
+            "fine_fn": compute_heuristic_v3g_fine_grid,
+            "vmax": XT_V3_SURFACE_MAX,
+            "delta_col": "delta_xt_v3g",
+            "xt_end_col": "xt_end_v3g",
+            "desc": "Gaussiana na superfície (σx=5.0) + rampa máx. 5.5 pp/coluna.",
+        },
+        {
+            "key": "v3w",
+            "label": "Heurístico v3w",
+            "grid_fn": compute_heuristic_v3w_xt_grid,
+            "fine_fn": compute_heuristic_v3w_fine_grid,
+            "vmax": XT_V3_SURFACE_MAX,
+            "delta_col": "delta_xt_v3w",
+            "xt_end_col": "xt_end_v3w",
+            "desc": "Blend zonal amplo (52 m) + rampa máx. 6.0 pp/coluna.",
+        },
+        {
+            "key": "v3r",
+            "label": "Heurístico v3r",
+            "grid_fn": compute_heuristic_v3r_xt_grid,
+            "fine_fn": compute_heuristic_v3r_fine_grid,
+            "vmax": XT_V3_SURFACE_MAX,
+            "delta_col": "delta_xt_v3r",
+            "xt_end_col": "xt_end_v3r",
+            "desc": "Média móvel entre colunas + rampa máx. 4.5 pp por coluna.",
+        },
+    ]
 
     st.markdown("### Mapa xT por quadrante")
     st.caption(
-        "Cada célula mostra o xT médio em percentual. "
-        "**v3s** usa a **mesma lógica do v3c**, com grade **18×12**. "
-        "**v3q** usa grade **18×12** calibrada (colunas A–F: 3%, 10%, 17%, 24%, 32%, 42%) "
-        "agrupada em **24 quadrantes (6×4)**."
+        "Comparação do **v3 original** com três variantes de transição gradual. "
+        "Todas preservam valorização relativa (centro e proximidade ao gol > laterais/defesa)."
     )
-    grid_v3 = compute_heuristic_v3_xt_grid()
-    grid_v3c = compute_heuristic_v3c_xt_grid()
-    grid_v3s = compute_heuristic_v3s_xt_grid()
-    grid_v3q = compute_heuristic_v3q_xt_grid()
+
+    grids = {m["key"]: m["grid_fn"]() for m in compare_models}
+    jump_rows = [
+        {
+            "Modelo": m["key"],
+            "Máx salto col. adj. (%)": round(_max_adjacent_col_jump_pct(grids[m["key"]]), 1),
+        }
+        for m in compare_models
+    ]
+    st.dataframe(pd.DataFrame(jump_rows), use_container_width=True, hide_index=True)
+
     grid_cols = st.columns(4)
-    with grid_cols[0]:
-        st.markdown('<div class="map-label">Heurístico v3</div>', unsafe_allow_html=True)
-        img_gv3, fig_gv3 = draw_xt_grid_map(grid_v3, "Heurístico v3", as_percent=True)
-        plt.close(fig_gv3)
-        st.image(img_gv3, use_container_width=True)
-        st.caption(f"16×12 · Máx: {grid_v3.max():.3f} · Média: {grid_v3.mean():.3f}")
-    with grid_cols[1]:
-        st.markdown('<div class="map-label">Heurístico v3c</div>', unsafe_allow_html=True)
-        img_gv3c, fig_gv3c = draw_xt_grid_map(grid_v3c, "Heurístico v3c", as_percent=True)
-        plt.close(fig_gv3c)
-        st.image(img_gv3c, use_container_width=True)
-        st.caption(f"16×12 · Máx: {grid_v3c.max():.3f} · Média: {grid_v3c.mean():.3f}")
-    with grid_cols[2]:
-        st.markdown('<div class="map-label">Heurístico v3s (18×12)</div>', unsafe_allow_html=True)
-        img_gv3s, fig_gv3s = draw_xt_grid_map(
-            grid_v3s, "Heurístico v3s", as_percent=True, n_x=NX_XT_V3S, n_y=NY_XT,
-        )
-        plt.close(fig_gv3s)
-        st.image(img_gv3s, use_container_width=True)
-        st.caption(f"18×12 · Máx: {grid_v3s.max():.3f} · Média: {grid_v3s.mean():.3f}")
-    with grid_cols[3]:
-        st.markdown('<div class="map-label">Heurístico v3q (6×4)</div>', unsafe_allow_html=True)
-        img_gv3q, fig_gv3q = draw_xt_grid_map(
-            grid_v3q, "Heurístico v3q", as_percent=True, n_x=NX_XT_V3Q, n_y=NY_XT_V3Q,
-        )
-        plt.close(fig_gv3q)
-        st.image(img_gv3q, use_container_width=True)
-        st.caption(f"6×4 (24) · Máx: {grid_v3q.max():.3f} · Média: {grid_v3q.mean():.3f}")
+    for col, model in zip(grid_cols, compare_models):
+        grid = grids[model["key"]]
+        with col:
+            st.markdown(f'<div class="map-label">{model["label"]}</div>', unsafe_allow_html=True)
+            img, fig = draw_xt_grid_map(grid, model["label"], as_percent=True)
+            plt.close(fig)
+            st.image(img, use_container_width=True)
+            st.caption(
+                f"16×12 · Máx: {grid.max():.3f} · Média: {grid.mean():.3f} · "
+                f"{model['desc']}"
+            )
 
     with st.expander("Superfície contínua xT"):
         surf_cols = st.columns(4)
-        fine_v3 = compute_heuristic_v3_fine_grid()
-        fine_v3c = compute_heuristic_v3c_fine_grid()
-        fine_v3q = compute_heuristic_v3q_fine_grid()
-        with surf_cols[0]:
-            img_v3, fig_v3 = draw_xt_threat_surface(fine_v3, "Superfície v3", XT_V3_SURFACE_MAX)
-            plt.close(fig_v3)
-            st.image(img_v3, use_container_width=True)
-        with surf_cols[1]:
-            img_v3c, fig_v3c = draw_xt_threat_surface(fine_v3c, "Superfície v3c", XT_V3C_SURFACE_MAX)
-            plt.close(fig_v3c)
-            st.image(img_v3c, use_container_width=True)
-        with surf_cols[2]:
-            img_v3s, fig_v3s = draw_xt_threat_surface(fine_v3c, "Superfície v3s (= v3c)", XT_V3C_SURFACE_MAX)
-            plt.close(fig_v3s)
-            st.image(img_v3s, use_container_width=True)
-        with surf_cols[3]:
-            img_v3q, fig_v3q = draw_xt_threat_surface(fine_v3q, "Superfície v3q", XT_V3C_SURFACE_MAX)
-            plt.close(fig_v3q)
-            st.image(img_v3q, use_container_width=True)
+        for col, model in zip(surf_cols, compare_models):
+            with col:
+                fine = model["fine_fn"]()
+                img, fig = draw_xt_threat_surface(
+                    fine, f"Superfície {model['key']}", model["vmax"]
+                )
+                plt.close(fig)
+                st.image(img, use_container_width=True)
 
     st.markdown("---")
-    st.markdown("### Top 10 ΔxT — v3 / v3c / v3s / v3q")
+    st.markdown("### Top 10 ΔxT — v3 / v3g / v3w / v3r")
 
     summary_rows = []
     for player in PLAYERS:
@@ -1529,51 +1520,24 @@ def render_xt_model_comparison(
 
         xt_actions = df[df["category"].isin(["passes", "ball-carries"]) & df["has_end"]]
         passes = df[df["category"] == "passes"]
-        summary_rows.append({
-            "Jogador": player["name"],
-            "Σ ΔxT v3": round(_safe_col_sum(xt_actions, "delta_xt"), 3),
-            "Σ ΔxT v3c": round(_safe_col_sum(xt_actions, "delta_xt_v3c"), 3),
-            "Σ ΔxT v3s": round(_safe_col_sum(xt_actions, "delta_xt_v3s"), 3),
-            "Σ ΔxT v3q": round(_safe_col_sum(xt_actions, "delta_xt_v3q"), 3),
-            "Σ xT final v3": round(_safe_col_sum(passes, "xt_end"), 3),
-            "Σ xT final v3c": round(_safe_col_sum(passes, "xt_end_v3c"), 3),
-            "Σ xT final v3s": round(_safe_col_sum(passes, "xt_end_v3s"), 3),
-            "Σ xT final v3q": round(_safe_col_sum(passes, "xt_end_v3q"), 3),
-        })
+        row = {"Jogador": player["name"]}
+        for model in compare_models:
+            key = model["key"]
+            row[f"Σ ΔxT {key}"] = round(_safe_col_sum(xt_actions, model["delta_col"]), 3)
+            row[f"Σ xT final {key}"] = round(_safe_col_sum(passes, model["xt_end_col"]), 3)
+        summary_rows.append(row)
 
         cmp_cols = st.columns(4)
-        with cmp_cols[0]:
-            st.markdown('<div class="map-label">Top ΔxT · v3</div>', unsafe_allow_html=True)
-            _show_map(
-                lambda d, n, m: draw_top_deltaxt_map(
-                    d, n, m, delta_col="delta_xt", model_label="v3"
-                ),
-                df, player["name"], match_label, "Sem ações com ΔxT positivo (v3).",
-            )
-        with cmp_cols[1]:
-            st.markdown('<div class="map-label">Top ΔxT · v3c</div>', unsafe_allow_html=True)
-            _show_map(
-                lambda d, n, m: draw_top_deltaxt_map(
-                    d, n, m, delta_col="delta_xt_v3c", model_label="v3c"
-                ),
-                df, player["name"], match_label, "Sem ações com ΔxT positivo (v3c).",
-            )
-        with cmp_cols[2]:
-            st.markdown('<div class="map-label">Top ΔxT · v3s</div>', unsafe_allow_html=True)
-            _show_map(
-                lambda d, n, m: draw_top_deltaxt_map(
-                    d, n, m, delta_col="delta_xt_v3s", model_label="v3s"
-                ),
-                df, player["name"], match_label, "Sem ações com ΔxT positivo (v3s).",
-            )
-        with cmp_cols[3]:
-            st.markdown('<div class="map-label">Top ΔxT · v3q</div>', unsafe_allow_html=True)
-            _show_map(
-                lambda d, n, m: draw_top_deltaxt_map(
-                    d, n, m, delta_col="delta_xt_v3q", model_label="v3q"
-                ),
-                df, player["name"], match_label, "Sem ações com ΔxT positivo (v3q).",
-            )
+        for col, model in zip(cmp_cols, compare_models):
+            with col:
+                st.markdown(f'<div class="map-label">Top ΔxT · {model["key"]}</div>', unsafe_allow_html=True)
+                _show_map(
+                    lambda d, n, m, mc=model["delta_col"], ml=model["key"]: draw_top_deltaxt_map(
+                        d, n, m, delta_col=mc, model_label=ml
+                    ),
+                    df, player["name"], match_label,
+                    f"Sem ações com ΔxT positivo ({model['key']}).",
+                )
 
     if summary_rows:
         st.markdown("---")
@@ -1618,9 +1582,9 @@ with st.sidebar:
     st.markdown("---")
     match_options = [ALL_MATCHES_LABEL, *get_available_matches(player_data)]
     selected_match = st.selectbox("Selecionar partida", match_options, label_visibility="collapsed")
-    st.caption("xT v3 · v3c · v3s (= v3c, 18×12) · v3q (24 quadrantes) · Progressivos Wyscout")
+    st.caption("xT v3 · v3g (gauss.) · v3w (blend amplo) · v3r (rampa) · Progressivos Wyscout")
 
-tab_analysis, tab_compare = st.tabs(["Análise", "Comparar xT v3 / v3c / v3s / v3q"])
+tab_analysis, tab_compare = st.tabs(["Análise", "Comparar xT v3 / v3g / v3w / v3r"])
 
 with tab_analysis:
     render_comparison(player_data, selected_match)
