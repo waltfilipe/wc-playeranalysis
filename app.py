@@ -104,6 +104,21 @@ XT_V5_MAX_DELTA_MID = 0.36
 XT_V5_MAX_DELTA_ATT = 0.42
 XT_V5_MAX_DELTA_BOX = 0.52
 
+# xT Heurístico v3c — conservador (0–0.5), transições mais suaves
+XT_MODEL_HEURISTIC_V3C = "heuristic_v3c"
+XT_V3C_SURFACE_MAX = 0.50
+XT_V3C_DEF_MAX = 0.125
+XT_V3C_MID_MAX = 0.30
+XT_V3C_ATT_BYLINE = 0.47
+XT_V3C_ZONE_BLEND_WIDTH = 42.0
+XT_V3C_LAT_DISC_MAX = 0.08
+XT_V3C_CENTRAL_PREMIUM = 0.03
+XT_V3C_CORNER_PENALTY = 0.05
+XT_V3C_MAX_DELTA_DEF = 0.14
+XT_V3C_MAX_DELTA_MID = 0.18
+XT_V3C_MAX_DELTA_ATT = 0.21
+XT_V3C_MAX_DELTA_BOX = 0.26
+
 CARD_TITLE_TEXT = "14px"
 CARD_LABEL_TEXT = "16px"
 CARD_INNER_BORDER = "rgba(107,114,128,0.45)"
@@ -347,6 +362,118 @@ def apply_heuristic_v3_xt(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+# ── xT HEURÍSTICO v3c (conservador) ──────────────────────────
+def _location_factor_v3c(x: np.ndarray, y: np.ndarray) -> np.ndarray:
+    lat = _lateral_relative_position(y)
+    depth = np.clip(
+        (x - OPT_ATTACKING_TWO_THIRDS_X) / (FIELD_X - OPT_ATTACKING_TWO_THIRDS_X),
+        0.0,
+        1.0,
+    )
+    zone_gate = _smootherstep(depth)
+    max_discount = XT_V3C_LAT_DISC_MAX * zone_gate
+    lateral_curve = _smootherstep(lat ** XT_V3_LAT_CURVE_POWER)
+    return 1.0 - max_discount * lateral_curve
+
+
+def _v4_xg_finishing_factor_v3c(x: np.ndarray, y: np.ndarray) -> np.ndarray:
+    box_gate = _v4_box_gate(x)
+    cent = _centrality(y)
+    lat = _lateral_relative_position(y)
+    central_bonus = XT_V3C_CENTRAL_PREMIUM * box_gate * _smootherstep(cent)
+    wide_in_box = box_gate * _smootherstep(np.clip((lat - XT_V4_CORNER_LAT_ON) / 0.42, 0.0, 1.0))
+    wide_discount = XT_V3C_CORNER_PENALTY * wide_in_box
+    return np.clip(1.0 + central_bonus - wide_discount, 0.97, 1.03)
+
+
+def _map_zonal_threat_v3c_smooth(x: np.ndarray) -> np.ndarray:
+    """Mesma lógica de zonas do v3, com blend mais largo e curvas mais suaves."""
+    blend = XT_V3C_ZONE_BLEND_WIDTH
+    x = np.clip(x, 0.0, FIELD_X)
+    threat_def = XT_V3C_DEF_MAX * _smootherstep(np.clip(x / OPT_ATTACKING_TWO_THIRDS_X, 0.0, 1.0))
+    mid_span = max(FINAL_THIRD_LINE_X - OPT_ATTACKING_TWO_THIRDS_X, 1.0)
+    mid_t = np.clip((x - OPT_ATTACKING_TWO_THIRDS_X) / mid_span, 0.0, 1.0)
+    threat_mid = XT_V3C_DEF_MAX + (XT_V3C_MID_MAX - XT_V3C_DEF_MAX) * _smootherstep(mid_t)
+    att_span = max(FIELD_X - FINAL_THIRD_LINE_X, 1.0)
+    att_t = np.clip((x - FINAL_THIRD_LINE_X) / att_span, 0.0, 1.0)
+    threat_att = XT_V3C_MID_MAX + (XT_V3C_ATT_BYLINE - XT_V3C_MID_MAX) * _smootherstep(att_t)
+    w_def = 1.0 - _smootherstep(np.clip((x - (OPT_ATTACKING_TWO_THIRDS_X - blend)) / blend, 0.0, 1.0))
+    w_att = _smootherstep(np.clip((x - (FINAL_THIRD_LINE_X - blend)) / blend, 0.0, 1.0))
+    w_mid = np.clip(1.0 - w_def - w_att, 0.0, 1.0)
+    w_sum = w_def + w_mid + w_att + 1e-12
+    return (w_def * threat_def + w_mid * threat_mid + w_att * threat_att) / w_sum
+
+
+def _build_heuristic_v3c_threat_surface(Xc: np.ndarray, Yc: np.ndarray) -> np.ndarray:
+    zonal = _map_zonal_threat_v3c_smooth(Xc)
+    surface = zonal * _location_factor_v3c(Xc, Yc) * _v4_xg_finishing_factor_v3c(Xc, Yc)
+    surface = np.clip(surface, 0.0, XT_V3C_SURFACE_MAX)
+    return _enforce_row_monotonic_x(surface)
+
+
+@st.cache_data(show_spinner=False)
+def compute_heuristic_v3c_fine_grid(nx: int = XT_V3_FINE_NX, ny: int = XT_V3_FINE_NY) -> np.ndarray:
+    xe = np.linspace(0.0, FIELD_X, nx)
+    ye = np.linspace(0.0, FIELD_Y, ny)
+    Xc, Yc = np.meshgrid(xe, ye)
+    return _build_heuristic_v3c_threat_surface(Xc, Yc)
+
+
+def _v3c_zone_max_pass_delta(x_start: float) -> float:
+    x = float(np.clip(x_start, 0.0, FIELD_X))
+    control_points = [
+        (0.0, XT_V3C_MAX_DELTA_DEF),
+        (OPT_ATTACKING_TWO_THIRDS_X, XT_V3C_MAX_DELTA_MID),
+        (FINAL_THIRD_LINE_X, XT_V3C_MAX_DELTA_ATT),
+        (XT_V4_BOX_X_START, XT_V3C_MAX_DELTA_BOX),
+        (FIELD_X, XT_V3C_MAX_DELTA_BOX),
+    ]
+    for idx in range(len(control_points) - 1):
+        x0, cap0 = control_points[idx]
+        x1, cap1 = control_points[idx + 1]
+        if x <= x1:
+            if x1 <= x0:
+                return cap1
+            t = float(_smootherstep(np.array([(x - x0) / (x1 - x0)]))[0])
+            return cap0 + (cap1 - cap0) * t
+    return control_points[-1][1]
+
+
+def _adjust_heuristic_v3c_pass_delta(row) -> float:
+    if not row.is_won:
+        return 0.0
+    raw = float(row.xt_end_v3c - row.xt_start_v3c)
+    if raw >= 0:
+        adjusted = raw * _v3_short_pass_multiplier(row.pass_distance)
+        return min(adjusted, _v3c_zone_max_pass_delta(row.x_start))
+    lat_start = _lateral_frac(row.y_start)
+    lat_end = _lateral_frac(row.y_end)
+    if row.x_start < XT_V3_NEG_RECYCLE_X_MAX:
+        adjusted = raw * (XT_V3_NEG_PENALTY_FACTOR if lat_end < lat_start else 1.0)
+    else:
+        adjusted = raw
+    if (
+        row.x_start < XT_V3_PRESSURE_X_MAX
+        and lat_start > XT_V3_WIDE_FRAC
+        and lat_end < lat_start - 0.12
+    ):
+        adjusted += XT_V3_PRESSURE_ESCAPE_BONUS * 0.5
+    return adjusted
+
+
+def apply_heuristic_v3c_xt(df: pd.DataFrame) -> pd.DataFrame:
+    fine = compute_heuristic_v3c_fine_grid()
+    out = df.copy()
+    out["xt_start_v3c"] = out.apply(
+        lambda r: xt_value_bilinear(r["x_start"], r["y_start"], fine), axis=1
+    )
+    out["xt_end_v3c"] = out.apply(
+        lambda r: xt_value_bilinear(r["x_end"], r["y_end"], fine), axis=1
+    )
+    out["delta_xt_v3c"] = out.apply(_adjust_heuristic_v3c_pass_delta, axis=1)
+    return out
+
+
 def classify_xt_progressive_v3_adjusted(
     xt_start: float,
     delta_xt: float,
@@ -426,7 +553,7 @@ def enrich_with_xt_v3(df: pd.DataFrame) -> pd.DataFrame:
     carry_mask = out["category"] == "ball-carries"
     out.loc[carry_mask, "is_won"] = out.loc[carry_mask, "has_end"]
 
-    for col in ("xt_start", "xt_end", "delta_xt"):
+    for col in ("xt_start", "xt_end", "delta_xt", "xt_start_v3c", "xt_end_v3c", "delta_xt_v3c"):
         out[col] = 0.0
     out["progressive"] = False
     out["impact_pass"] = False
@@ -441,6 +568,11 @@ def enrich_with_xt_v3(df: pd.DataFrame) -> pd.DataFrame:
     xt_df = apply_heuristic_v3_xt(out.loc[xt_mask].copy())
     out.loc[xt_mask, ["xt_start", "xt_end", "delta_xt"]] = xt_df[
         ["xt_start", "xt_end", "delta_xt"]
+    ].values
+
+    xt_df_v3c = apply_heuristic_v3c_xt(out.loc[xt_mask].copy())
+    out.loc[xt_mask, ["xt_start_v3c", "xt_end_v3c", "delta_xt_v3c"]] = xt_df_v3c[
+        ["xt_start_v3c", "xt_end_v3c", "delta_xt_v3c"]
     ].values
 
     pass_mask = out["category"] == "passes"
@@ -527,15 +659,19 @@ def load_player_all_matches(code: str, name: str, base_dir: Path | None = None) 
     return combined
 
 
-def top_deltaxt_actions(df: pd.DataFrame, n: int = TOP_DELTAXT_N) -> pd.DataFrame:
+def top_deltaxt_actions(
+    df: pd.DataFrame, n: int = TOP_DELTAXT_N, delta_col: str = "delta_xt"
+) -> pd.DataFrame:
     """Top N passes and carries by positive delta xT."""
     actions = df[
         df["category"].isin(["passes", "ball-carries"]) & df["has_end"]
     ].copy()
-    actions = actions[actions["delta_xt"] > 0]
+    if delta_col not in actions.columns:
+        return pd.DataFrame()
+    actions = actions[actions[delta_col] > 0]
     if actions.empty:
         return actions
-    return actions.nlargest(n, "delta_xt")
+    return actions.nlargest(n, delta_col)
 
 
 def get_available_matches(player_data: dict[str, pd.DataFrame]) -> list[str]:
@@ -860,9 +996,16 @@ def draw_carry_map(df: pd.DataFrame, player_name: str, match_label: str):
     return _save_fig(fig), fig
 
 
-def draw_top_deltaxt_map(df: pd.DataFrame, player_name: str, match_label: str):
+def draw_top_deltaxt_map(
+    df: pd.DataFrame,
+    player_name: str,
+    match_label: str,
+    *,
+    delta_col: str = "delta_xt",
+    model_label: str = "v3",
+):
     """Top delta-xT actions with distinct colormaps for passes vs carries."""
-    top = top_deltaxt_actions(df, TOP_DELTAXT_N)
+    top = top_deltaxt_actions(df, TOP_DELTAXT_N, delta_col=delta_col)
     fig, ax, pitch = _base_pitch()
     scale = _map_scale()
 
@@ -874,13 +1017,13 @@ def draw_top_deltaxt_map(df: pd.DataFrame, player_name: str, match_label: str):
     else:
         passes = top[top["category"] == "passes"]
         carries = top[top["category"] == "ball-carries"]
-        pass_vmax = max(float(passes["delta_xt"].max()), 0.01) if not passes.empty else 0.01
-        carry_vmax = max(float(carries["delta_xt"].max()), 0.01) if not carries.empty else 0.01
+        pass_vmax = max(float(passes[delta_col].max()), 0.01) if not passes.empty else 0.01
+        carry_vmax = max(float(carries[delta_col].max()), 0.01) if not carries.empty else 0.01
 
         if not passes.empty:
             norm_pass = Normalize(vmin=0, vmax=pass_vmax)
             for _, row in passes.iterrows():
-                color = CMAP_PASS(norm_pass(row["delta_xt"]))
+                color = CMAP_PASS(norm_pass(row[delta_col]))
                 _delicate_arrows(
                     pitch, ax,
                     row["x_start"], row["y_start"], row["x_end"], row["y_end"],
@@ -895,7 +1038,7 @@ def draw_top_deltaxt_map(df: pd.DataFrame, player_name: str, match_label: str):
         if not carries.empty:
             norm_carry = Normalize(vmin=0, vmax=carry_vmax)
             for _, row in carries.iterrows():
-                color = CMAP_CARRY(norm_carry(row["delta_xt"]))
+                color = CMAP_CARRY(norm_carry(row[delta_col]))
                 _delicate_arrows(
                     pitch, ax,
                     row["x_start"], row["y_start"], row["x_end"], row["y_end"],
@@ -914,9 +1057,31 @@ def draw_top_deltaxt_map(df: pd.DataFrame, player_name: str, match_label: str):
         _add_map_legend(ax, legend_handles)
 
     ax.set_title(
-        f"{player_name}\nTop {TOP_DELTAXT_N} ΔxT · {match_label}",
+        f"{player_name}\nTop {TOP_DELTAXT_N} ΔxT · {model_label} · {match_label}",
         color="white", fontsize=8.8 * scale, pad=5,
     )
+    _attack_arrow(fig)
+    return _save_fig(fig), fig
+
+
+def draw_xt_threat_surface(grid: np.ndarray, title: str, vmax: float):
+    """Heatmap of the heuristic xT threat surface on the pitch."""
+    pitch = Pitch(pitch_type="statsbomb", pitch_color="#1a1a2e", line_color="#ffffff", line_alpha=0.95)
+    fig, ax = pitch.draw(figsize=(FIG_W, FIG_H))
+    fig.set_facecolor("#1a1a2e")
+    fig.set_dpi(FIG_DPI)
+    scale = _map_scale()
+
+    ny, nx = grid.shape
+    x_edges = np.linspace(0, FIELD_X, nx + 1)
+    y_edges = np.linspace(0, FIELD_Y, ny + 1)
+    ax.pcolormesh(
+        x_edges, y_edges, grid,
+        cmap="magma", vmin=0, vmax=vmax, shading="auto", alpha=0.88, zorder=1,
+    )
+    pitch.draw(ax=ax)
+
+    ax.set_title(title, color="white", fontsize=8.8 * scale, pad=5)
     _attack_arrow(fig)
     return _save_fig(fig), fig
 
@@ -976,6 +1141,78 @@ def render_comparison(player_data: dict[str, pd.DataFrame], match_selection: str
                 render_impact_card(compute_player_stats(df), player["tone"])
 
 
+def render_xt_model_comparison(
+    player_data: dict[str, pd.DataFrame], match_selection: str
+) -> None:
+    """Compare xT v3 vs conservative v3c threat surfaces and top ΔxT maps."""
+    match_label = _match_scope_label(match_selection)
+
+    st.markdown("### Superfície de ameaça xT")
+    st.caption(
+        "v3c conservador: escala 0–0.5, mesmas zonas do v3 com transições mais suaves "
+        f"(blend {XT_V3C_ZONE_BLEND_WIDTH:.0f}m vs {XT_V3_ZONE_BLEND_WIDTH:.0f}m no v3)."
+    )
+    surf_cols = st.columns(2)
+    grid_v3 = compute_heuristic_v3_fine_grid()
+    grid_v3c = compute_heuristic_v3c_fine_grid()
+    with surf_cols[0]:
+        st.markdown('<div class="map-label">xT Heurístico v3 (0–1)</div>', unsafe_allow_html=True)
+        img_v3, fig_v3 = draw_xt_threat_surface(grid_v3, "Superfície v3", XT_V3_SURFACE_MAX)
+        plt.close(fig_v3)
+        st.image(img_v3, use_container_width=True)
+        st.caption(f"Máx: {grid_v3.max():.3f} · Média: {grid_v3.mean():.3f}")
+    with surf_cols[1]:
+        st.markdown('<div class="map-label">xT Heurístico v3c conservador (0–0.5)</div>', unsafe_allow_html=True)
+        img_v3c, fig_v3c = draw_xt_threat_surface(grid_v3c, "Superfície v3c", XT_V3C_SURFACE_MAX)
+        plt.close(fig_v3c)
+        st.image(img_v3c, use_container_width=True)
+        st.caption(f"Máx: {grid_v3c.max():.3f} · Média: {grid_v3c.mean():.3f}")
+
+    st.markdown("---")
+    st.markdown("### Top 10 ΔxT — v3 vs v3c")
+
+    summary_rows = []
+    for player in PLAYERS:
+        df = filter_by_match(player_data[player["code"]], match_selection)
+        st.markdown(f'<div class="player-header">{player["name"]}</div>', unsafe_allow_html=True)
+
+        if df.empty:
+            st.warning(f"Sem dados para {player['name']}.")
+            continue
+
+        xt_actions = df[df["category"].isin(["passes", "ball-carries"]) & df["has_end"]]
+        summary_rows.append({
+            "Jogador": player["name"],
+            "Σ ΔxT v3": round(float(xt_actions["delta_xt"].sum()), 3),
+            "Σ ΔxT v3c": round(float(xt_actions["delta_xt_v3c"].sum()), 3),
+            "Σ xT final v3": round(float(df[df["category"] == "passes"]["xt_end"].sum()), 3),
+            "Σ xT final v3c": round(float(df[df["category"] == "passes"]["xt_end_v3c"].sum()), 3),
+        })
+
+        cmp_cols = st.columns(2)
+        with cmp_cols[0]:
+            st.markdown('<div class="map-label">Top ΔxT · v3</div>', unsafe_allow_html=True)
+            _show_map(
+                lambda d, n, m: draw_top_deltaxt_map(
+                    d, n, m, delta_col="delta_xt", model_label="v3"
+                ),
+                df, player["name"], match_label, "Sem ações com ΔxT positivo (v3).",
+            )
+        with cmp_cols[1]:
+            st.markdown('<div class="map-label">Top ΔxT · v3c</div>', unsafe_allow_html=True)
+            _show_map(
+                lambda d, n, m: draw_top_deltaxt_map(
+                    d, n, m, delta_col="delta_xt_v3c", model_label="v3c"
+                ),
+                df, player["name"], match_label, "Sem ações com ΔxT positivo (v3c).",
+            )
+
+    if summary_rows:
+        st.markdown("---")
+        st.markdown("### Resumo comparativo")
+        st.dataframe(pd.DataFrame(summary_rows), use_container_width=True, hide_index=True)
+
+
 # ── MAIN ─────────────────────────────────────────────────────
 st.markdown(
     """
@@ -1010,6 +1247,12 @@ with st.sidebar:
     st.markdown("---")
     match_options = [ALL_MATCHES_LABEL, *get_available_matches(player_data)]
     selected_match = st.selectbox("Selecionar partida", match_options, label_visibility="collapsed")
-    st.caption("xT Heurístico v3 · Progressivos Wyscout")
+    st.caption("xT v3 · v3c conservador · Progressivos Wyscout")
 
-render_comparison(player_data, selected_match)
+tab_analysis, tab_compare = st.tabs(["Análise", "Comparar xT v3 vs v3c"])
+
+with tab_analysis:
+    render_comparison(player_data, selected_match)
+
+with tab_compare:
+    render_xt_model_comparison(player_data, selected_match)
