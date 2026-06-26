@@ -49,11 +49,17 @@ FIELD_X, FIELD_Y = 120.0, 80.0
 HALF_LINE_X = FIELD_X / 2
 FINAL_THIRD_LINE_X = 80.0
 GOAL_X, GOAL_Y = 120.0, 40.0
-FIG_W, FIG_H = 6.2, 4.1
+FIG_W, FIG_H = 5.4, 3.5
 FIG_DPI = 160
-PASS_START_MARKER_SIZE = 10
-CARRY_START_MARKER_SIZE = 10
-MAP_REF_WIDTH = 6.2
+PASS_START_MARKER_SIZE = 6
+CARRY_START_MARKER_SIZE = 6
+MAP_REF_WIDTH = 5.4
+ARROW_WIDTH = 0.75
+ARROW_HEADWIDTH = 1.15
+ARROW_HEADLENGTH = 1.15
+ARROW_ALPHA = 0.68
+ARROW_ALPHA_EMPH = 0.82
+ALL_MATCHES_LABEL = "All Matches"
 WYSCOUT_PITCH_SIZE = 100.0
 OPT_ATTACKING_TWO_THIRDS_X = 40.0
 WYSCOUT_PROG_OWN_HALF = 30.0
@@ -116,6 +122,14 @@ CMAP_PASS = LinearSegmentedColormap.from_list(
 CMAP_CARRY = LinearSegmentedColormap.from_list(
     "carry_dxt", ["#fde68a", "#fbbf24", "#f59e0b", "#b45309"]
 )
+
+COLOR_SUCCESS = "#6ee7b7"
+COLOR_PROGRESSIVE = "#7dd3fc"
+COLOR_HIGHLY_PROGRESSIVE = "#fcd34d"
+COLOR_FAIL = "#fca5a5"
+COLOR_CARRY = "#c4b5fd"
+ALPHA_SUCCESS = 0.50
+COLOR_CARRY_BASE_ALPHA = 0.50
 
 
 # ── COORDINATE HELPERS ───────────────────────────────────────
@@ -524,6 +538,26 @@ def top_deltaxt_actions(df: pd.DataFrame, n: int = TOP_DELTAXT_N) -> pd.DataFram
     return actions.nlargest(n, "delta_xt")
 
 
+def get_available_matches(player_data: dict[str, pd.DataFrame]) -> list[str]:
+    matches: set[str] = set()
+    for df in player_data.values():
+        if not df.empty and "match" in df.columns:
+            matches.update(df["match"].dropna().unique())
+    return sorted(matches)
+
+
+def filter_by_match(df: pd.DataFrame, match_selection: str) -> pd.DataFrame:
+    if df.empty or match_selection == ALL_MATCHES_LABEL:
+        return df
+    if "match" not in df.columns:
+        return df
+    return df[df["match"] == match_selection].copy()
+
+
+def _match_scope_label(match_selection: str) -> str:
+    return "todos os jogos" if match_selection == ALL_MATCHES_LABEL else match_selection
+
+
 # ── STATS ────────────────────────────────────────────────────
 def compute_player_stats(df: pd.DataFrame) -> dict:
     passes = df[df["category"] == "passes"]
@@ -723,7 +757,110 @@ def _save_fig(fig):
     return Image.open(buf)
 
 
-def draw_top_deltaxt_map(df: pd.DataFrame, player_name: str):
+def _delicate_arrows(
+    pitch, ax, x1, y1, x2, y2, color, scale: float, *, alpha: float | None = None, width_mult: float = 1.0
+) -> None:
+    pitch.arrows(
+        x1, y1, x2, y2,
+        color=color,
+        width=ARROW_WIDTH * scale * width_mult,
+        headwidth=ARROW_HEADWIDTH * scale * width_mult,
+        headlength=ARROW_HEADLENGTH * scale * width_mult,
+        ax=ax,
+        zorder=3,
+        alpha=alpha if alpha is not None else ARROW_ALPHA,
+    )
+
+
+def draw_pass_map(df: pd.DataFrame, player_name: str, match_label: str):
+    passes = df[df["category"] == "passes"].copy()
+    fig, ax, pitch = _base_pitch()
+    scale = _map_scale()
+
+    for _, row in passes.iterrows():
+        if not row["has_end"]:
+            continue
+        is_lost = not row["is_success"]
+        is_high_impact = bool(row.get("high_impact_pass", False))
+        is_prog = bool(row.get("progressive", False))
+        if is_lost:
+            color, alpha = COLOR_FAIL, ARROW_ALPHA_EMPH
+        elif is_high_impact:
+            color, alpha = COLOR_HIGHLY_PROGRESSIVE, ARROW_ALPHA_EMPH
+        elif is_prog:
+            color, alpha = COLOR_PROGRESSIVE, ARROW_ALPHA_EMPH
+        else:
+            color, alpha = COLOR_SUCCESS, ARROW_ALPHA
+
+        _delicate_arrows(
+            pitch, ax,
+            row["x_start"], row["y_start"], row["x_end"], row["y_end"],
+            color, scale, alpha=alpha,
+        )
+        pitch.scatter(
+            row["x_start"], row["y_start"],
+            s=PASS_START_MARKER_SIZE, marker="o", color=color,
+            edgecolors="white", linewidths=0.3, ax=ax, zorder=6, alpha=alpha,
+        )
+
+    legend_handles = [
+        Line2D([0], [0], color=COLOR_SUCCESS, lw=1.4 * scale, label="Completado", alpha=0.65),
+        Line2D([0], [0], color=COLOR_PROGRESSIVE, lw=1.4 * scale, label="Progressivo", alpha=0.80),
+        Line2D([0], [0], color=COLOR_HIGHLY_PROGRESSIVE, lw=1.4 * scale, label="High Impact", alpha=0.85),
+        Line2D([0], [0], color=COLOR_FAIL, lw=1.4 * scale, label="Incompleto", alpha=0.80),
+    ]
+    _add_map_legend(ax, legend_handles)
+    ax.set_title(
+        f"{player_name}\nPasses · {match_label}",
+        color="white", fontsize=8.8 * scale, pad=5,
+    )
+    _attack_arrow(fig)
+    return _save_fig(fig), fig
+
+
+def draw_carry_map(df: pd.DataFrame, player_name: str, match_label: str):
+    carries = df[df["category"] == "ball-carries"].copy()
+    fig, ax, pitch = _base_pitch()
+    scale = _map_scale()
+
+    for _, row in carries.iterrows():
+        if not row["has_end"]:
+            continue
+        is_high_impact = bool(row.get("high_impact_carry", False))
+        is_impact = bool(row.get("impact_carry", False))
+        if is_high_impact:
+            color, alpha = COLOR_HIGHLY_PROGRESSIVE, ARROW_ALPHA_EMPH
+        elif is_impact:
+            color, alpha = COLOR_PROGRESSIVE, ARROW_ALPHA_EMPH
+        else:
+            color, alpha = COLOR_CARRY, COLOR_CARRY_BASE_ALPHA
+
+        _delicate_arrows(
+            pitch, ax,
+            row["x_start"], row["y_start"], row["x_end"], row["y_end"],
+            color, scale, alpha=alpha,
+        )
+        pitch.scatter(
+            row["x_start"], row["y_start"],
+            s=CARRY_START_MARKER_SIZE, marker="o", color=color,
+            edgecolors="white", linewidths=0.3, ax=ax, zorder=6, alpha=alpha,
+        )
+
+    legend_handles = [
+        Line2D([0], [0], color=COLOR_CARRY, lw=1.4 * scale, label="Condução", alpha=0.60),
+        Line2D([0], [0], color=COLOR_PROGRESSIVE, lw=1.4 * scale, label="Impact", alpha=0.80),
+        Line2D([0], [0], color=COLOR_HIGHLY_PROGRESSIVE, lw=1.4 * scale, label="High Impact", alpha=0.85),
+    ]
+    _add_map_legend(ax, legend_handles)
+    ax.set_title(
+        f"{player_name}\nConduções · {match_label}",
+        color="white", fontsize=8.8 * scale, pad=5,
+    )
+    _attack_arrow(fig)
+    return _save_fig(fig), fig
+
+
+def draw_top_deltaxt_map(df: pd.DataFrame, player_name: str, match_label: str):
     """Top delta-xT actions with distinct colormaps for passes vs carries."""
     top = top_deltaxt_actions(df, TOP_DELTAXT_N)
     fig, ax, pitch = _base_pitch()
@@ -744,43 +881,41 @@ def draw_top_deltaxt_map(df: pd.DataFrame, player_name: str):
             norm_pass = Normalize(vmin=0, vmax=pass_vmax)
             for _, row in passes.iterrows():
                 color = CMAP_PASS(norm_pass(row["delta_xt"]))
-                pitch.arrows(
-                    row["x_start"], row["y_start"],
-                    row["x_end"], row["y_end"],
-                    color=color, width=2.0 * scale, headwidth=3.0 * scale,
-                    headlength=3.0 * scale, ax=ax, zorder=3, alpha=0.92,
+                _delicate_arrows(
+                    pitch, ax,
+                    row["x_start"], row["y_start"], row["x_end"], row["y_end"],
+                    color, scale, alpha=ARROW_ALPHA_EMPH,
                 )
                 pitch.scatter(
                     row["x_start"], row["y_start"],
-                    s=PASS_START_MARKER_SIZE + 20, marker="o", color=color,
-                    edgecolors="white", linewidths=0.5, ax=ax, zorder=6, alpha=0.95,
+                    s=PASS_START_MARKER_SIZE + 4, marker="o", color=color,
+                    edgecolors="white", linewidths=0.3, ax=ax, zorder=6, alpha=0.88,
                 )
 
         if not carries.empty:
             norm_carry = Normalize(vmin=0, vmax=carry_vmax)
             for _, row in carries.iterrows():
                 color = CMAP_CARRY(norm_carry(row["delta_xt"]))
-                pitch.arrows(
-                    row["x_start"], row["y_start"],
-                    row["x_end"], row["y_end"],
-                    color=color, width=2.4 * scale, headwidth=3.4 * scale,
-                    headlength=3.4 * scale, ax=ax, zorder=3, alpha=0.92,
+                _delicate_arrows(
+                    pitch, ax,
+                    row["x_start"], row["y_start"], row["x_end"], row["y_end"],
+                    color, scale, alpha=ARROW_ALPHA_EMPH, width_mult=1.05,
                 )
                 pitch.scatter(
                     row["x_end"], row["y_end"],
-                    s=CARRY_START_MARKER_SIZE + 30, marker="s", color=color,
-                    edgecolors="white", linewidths=0.5, ax=ax, zorder=6, alpha=0.95,
+                    s=CARRY_START_MARKER_SIZE + 6, marker="s", color=color,
+                    edgecolors="white", linewidths=0.3, ax=ax, zorder=6, alpha=0.88,
                 )
 
         legend_handles = [
-            Line2D([0], [0], color=CMAP_PASS(0.85), lw=2.2 * scale, label="Passe (ΔxT)"),
-            Line2D([0], [0], color=CMAP_CARRY(0.85), lw=2.2 * scale, label="Condução (ΔxT)"),
+            Line2D([0], [0], color=CMAP_PASS(0.85), lw=1.4 * scale, label="Passe (ΔxT)"),
+            Line2D([0], [0], color=CMAP_CARRY(0.85), lw=1.4 * scale, label="Condução (ΔxT)"),
         ]
         _add_map_legend(ax, legend_handles)
 
     ax.set_title(
-        f"{player_name}\nTop {TOP_DELTAXT_N} ΔxT (3 jogos)",
-        color="white", fontsize=9.5 * scale, pad=6,
+        f"{player_name}\nTop {TOP_DELTAXT_N} ΔxT · {match_label}",
+        color="white", fontsize=8.8 * scale, pad=5,
     )
     _attack_arrow(fig)
     return _save_fig(fig), fig
@@ -794,29 +929,49 @@ def load_all_three_players() -> dict[str, pd.DataFrame]:
     }
 
 
-def render_comparison(player_data: dict[str, pd.DataFrame]) -> None:
+def _show_map(draw_fn, df: pd.DataFrame, player_name: str, match_label: str, empty_msg: str) -> None:
+    if df.empty:
+        st.info(empty_msg)
+        return
+    img, fig = draw_fn(df, player_name, match_label)
+    plt.close(fig)
+    st.image(img, use_container_width=True)
+
+
+def render_comparison(player_data: dict[str, pd.DataFrame], match_selection: str) -> None:
+    match_label = _match_scope_label(match_selection)
     map_cols = st.columns(3)
+
     for col, player in zip(map_cols, PLAYERS):
         with col:
             st.markdown(f'<div class="player-header">{player["name"]}</div>', unsafe_allow_html=True)
-            st.markdown(
-                f'<div class="player-sub">Top {TOP_DELTAXT_N} ΔxT · passes + conduções</div>',
-                unsafe_allow_html=True,
-            )
-            df = player_data[player["code"]]
+            df = filter_by_match(player_data[player["code"]], match_selection)
+
             if df.empty:
                 st.warning(f"Sem dados para {player['name']}.")
-            else:
-                img, fig = draw_top_deltaxt_map(df, player["name"])
-                plt.close(fig)
-                st.image(img, use_container_width=True)
+                continue
+
+            st.markdown('<div class="map-label">Passes</div>', unsafe_allow_html=True)
+            _show_map(draw_pass_map, df, player["name"], match_label, "Sem passes no recorte.")
+
+            st.markdown('<div class="map-label">Conduções</div>', unsafe_allow_html=True)
+            _show_map(draw_carry_map, df, player["name"], match_label, "Sem conduções no recorte.")
+
+            st.markdown(
+                f'<div class="map-label">Top {TOP_DELTAXT_N} ΔxT</div>',
+                unsafe_allow_html=True,
+            )
+            _show_map(
+                draw_top_deltaxt_map, df, player["name"], match_label,
+                "Sem ações com ΔxT positivo.",
+            )
 
     st.markdown("---")
     st.markdown("### Impact")
     stat_cols = st.columns(3)
     for col, player in zip(stat_cols, PLAYERS):
         with col:
-            df = player_data[player["code"]]
+            df = filter_by_match(player_data[player["code"]], match_selection)
             if not df.empty:
                 render_impact_card(compute_player_stats(df), player["tone"])
 
@@ -842,4 +997,19 @@ if not any(not df.empty for df in player_data.values()):
     )
     st.stop()
 
-render_comparison(player_data)
+with st.sidebar:
+    st.markdown(
+        """
+        <div style="text-align:center;">
+          <h3 style="margin:0;color:#eef1f7;">Partidas</h3>
+          <p style="color:#94a3b8;font-size:0.85rem;">Filtrar mapas e stats</p>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    st.markdown("---")
+    match_options = [ALL_MATCHES_LABEL, *get_available_matches(player_data)]
+    selected_match = st.selectbox("Selecionar partida", match_options, label_visibility="collapsed")
+    st.caption("xT Heurístico v3 · Progressivos Wyscout")
+
+render_comparison(player_data, selected_match)
