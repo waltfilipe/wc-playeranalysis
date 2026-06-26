@@ -10,11 +10,12 @@ import pandas as pd
 import streamlit as st
 from matplotlib.lines import Line2D
 from matplotlib.patches import FancyArrowPatch
+from matplotlib.colors import LinearSegmentedColormap, Normalize
 from mplsoccer import Pitch
 from PIL import Image
 
 # ── PAGE CONFIG ────────────────────────────────────────────────
-st.set_page_config(layout="wide", page_title="Player Analysis — Action Map")
+st.set_page_config(layout="wide", page_title="WC Player Analysis — Top ΔxT")
 
 st.markdown(
     """
@@ -100,41 +101,21 @@ XT_V5_MAX_DELTA_BOX = 0.52
 CARD_TITLE_TEXT = "14px"
 CARD_LABEL_TEXT = "16px"
 CARD_INNER_BORDER = "rgba(107,114,128,0.45)"
-CARD_TONE_OVERVIEW = "#5b9bd5"
-CARD_TONE_PASSES = "#22c55e"
-CARD_TONE_IMPACT = "#a855f7"
+TOP_DELTAXT_N = 10
+EXCLUDED_CSV = {"enzo.csv"}
 
-COLOR_SUCCESS = "#c8c8c8"
-COLOR_PROGRESSIVE = "#2F80ED"
-COLOR_HIGHLY_PROGRESSIVE = "#1B44A8"
-COLOR_FAIL = "#E07070"
-ALPHA_SUCCESS = 0.07
-COLOR_CARRY = "#a855f7"
-COLOR_CARRY_BASE_ALPHA = 0.50
+PLAYERS = [
+    {"code": "BG", "name": "Bruno Guimarães", "tone": "#5b9bd5"},
+    {"code": "CS", "name": "Casemiro", "tone": "#e67e22"},
+    {"code": "LP", "name": "Lucas Paquetá", "tone": "#22c55e"},
+]
 
-ACTION_COLORS = {
-    "passes": "#5b9bd5",
-    "dribbles": "#22c55e",
-    "ball-carries": "#a855f7",
-    "defensive": "#ef4444",
-}
-
-CATEGORY_LABELS = {
-    "passes": "Passes",
-    "dribbles": "Dribles",
-    "ball-carries": "Conduções",
-    "defensive": "Ações defensivas",
-}
-
-ACTION_TYPE_LABELS = {
-    "pass": "Passe",
-    "dribble": "Drible",
-    "ball-carry": "Condução",
-    "tackle": "Desarme",
-    "interception": "Interceptação",
-    "clearance": "Corte",
-    "ball-recovery": "Recuperação",
-}
+CMAP_PASS = LinearSegmentedColormap.from_list(
+    "pass_dxt", ["#bfdbfe", "#60a5fa", "#2563eb", "#1e3a8a"]
+)
+CMAP_CARRY = LinearSegmentedColormap.from_list(
+    "carry_dxt", ["#fde68a", "#fbbf24", "#f59e0b", "#b45309"]
+)
 
 
 # ── COORDINATE HELPERS ───────────────────────────────────────
@@ -466,7 +447,10 @@ def enrich_with_xt_v3(df: pd.DataFrame) -> pd.DataFrame:
 # ── DATA LOADING ─────────────────────────────────────────────
 def discover_csv_files(base_dir: Path | None = None) -> list[Path]:
     root = base_dir or Path(__file__).resolve().parent
-    return sorted(root.glob("*.csv"))
+    return sorted(
+        p for p in root.glob("*.csv")
+        if p.name not in EXCLUDED_CSV
+    )
 
 
 def load_player_csv(path: Path) -> pd.DataFrame:
@@ -506,14 +490,33 @@ def load_player_csv(path: Path) -> pd.DataFrame:
     return enrich_with_xt_v3(pd.DataFrame(rows))
 
 
-def load_all_players(base_dir: Path | None = None) -> dict[str, pd.DataFrame]:
-    players: dict[str, pd.DataFrame] = {}
-    for path in discover_csv_files(base_dir):
-        try:
-            players[path.stem] = load_player_csv(path)
-        except Exception as exc:
-            st.warning(f"Não foi possível carregar `{path.name}`: {exc}")
-    return players
+def load_player_all_matches(code: str, name: str, base_dir: Path | None = None) -> pd.DataFrame:
+    """Aggregate all match CSVs for a player code (BG, CS, LP)."""
+    root = base_dir or Path(__file__).resolve().parent
+    files = sorted(root.glob(f"{code}-vs *.csv"))
+    if not files:
+        return pd.DataFrame()
+
+    frames = []
+    for path in files:
+        match_df = load_player_csv(path)
+        match_df["match"] = path.stem.replace(f"{code}-", "")
+        frames.append(match_df)
+
+    combined = pd.concat(frames, ignore_index=True)
+    combined["player"] = name
+    return combined
+
+
+def top_deltaxt_actions(df: pd.DataFrame, n: int = TOP_DELTAXT_N) -> pd.DataFrame:
+    """Top N passes and carries by positive delta xT."""
+    actions = df[
+        df["category"].isin(["passes", "ball-carries"]) & df["has_end"]
+    ].copy()
+    actions = actions[actions["delta_xt"] > 0]
+    if actions.empty:
+        return actions
+    return actions.nlargest(n, "delta_xt")
 
 
 # ── STATS ────────────────────────────────────────────────────
@@ -623,48 +626,25 @@ def stats_section_card(title: str, border_color: str, items: list[tuple[str, str
     st.markdown(_stats_card_shell_html(title, border_color, inner), unsafe_allow_html=True)
 
 
-def render_player_cards(stats: dict) -> None:
-    wyscout = stats["progressive_wyscout"]
+def render_impact_card(stats: dict, tone: str) -> None:
     impact = stats["impact_pass"]
     high_impact = stats["high_impact_pass"]
     carry_impact = stats["impact_carry"]
     carry_high = stats["high_impact_carry"]
-
-    col_overview, col_passes, col_impact = st.columns(3)
-    with col_overview:
-        stats_section_card(
-            "Overview",
-            CARD_TONE_OVERVIEW,
-            [
-                ("Total Passes", f"{stats['total_passes']:.0f}"),
-                ("% Accuracy", f"{stats['accuracy_pct']:.1f}%"),
-            ],
-        )
-    with col_passes:
-        stats_section_card(
-            "Passes",
-            CARD_TONE_PASSES,
-            [
-                ("Passes Progressivos", f"{wyscout['successful']:.0f}"),
-                ("% Acurácia Progressiva", f"{wyscout['accuracy_pct']:.1f}%"),
-                ("Impact Passes", f"{impact['successful']:.0f}"),
-                ("% Acurácia Impact Passes", f"{impact['accuracy_pct']:.1f}%"),
-                ("High Impact Passes", f"{high_impact['successful']:.0f}"),
-                ("% Acurácia High Impact", f"{high_impact['accuracy_pct']:.1f}%"),
-            ],
-        )
-    with col_impact:
-        stats_section_card(
-            "Impact",
-            CARD_TONE_IMPACT,
-            [
-                ("Pass Impact (xT v3)", f"{stats['sum_dxt_passes']:.2f}"),
-                ("Carry Impact (xT v3)", f"{stats['sum_dxt_carries']:.2f}"),
-                ("Impact Carries", f"{carry_impact['successful']:.0f}"),
-                ("High Impact Carries", f"{carry_high['successful']:.0f}"),
-                ("% Positive Impact", f"{stats['pos_pct']:.1f}%"),
-            ],
-        )
+    stats_section_card(
+        "Impact",
+        tone,
+        [
+            ("Pass Impact (xT v3)", f"{stats['sum_dxt_passes']:.2f}"),
+            ("Carry Impact (xT v3)", f"{stats['sum_dxt_carries']:.2f}"),
+            ("Total Impact (xT v3)", f"{stats['sum_dxt_passes'] + stats['sum_dxt_carries']:.2f}"),
+            ("Impact Passes", f"{impact['successful']:.0f}"),
+            ("High Impact Passes", f"{high_impact['successful']:.0f}"),
+            ("Impact Carries", f"{carry_impact['successful']:.0f}"),
+            ("High Impact Carries", f"{carry_high['successful']:.0f}"),
+            ("% Positive Impact", f"{stats['pos_pct']:.1f}%"),
+        ],
+    )
 
 
 # ── PITCH DRAWING ────────────────────────────────────────────
@@ -733,265 +713,123 @@ def _save_fig(fig):
     return Image.open(buf)
 
 
-def draw_pass_map(df: pd.DataFrame):
-    passes = df[df["category"] == "passes"].copy()
+def draw_top_deltaxt_map(df: pd.DataFrame, player_name: str):
+    """Top delta-xT actions with distinct colormaps for passes vs carries."""
+    top = top_deltaxt_actions(df, TOP_DELTAXT_N)
     fig, ax, pitch = _base_pitch()
     scale = _map_scale()
 
-    for _, row in passes.iterrows():
-        if not row["has_end"]:
-            continue
-        is_lost = not row["is_success"]
-        is_high_impact = bool(row.get("high_impact_pass", False))
-        is_prog = bool(row.get("progressive", False))
-        if is_lost:
-            color, alpha = COLOR_FAIL, 0.72
-        elif is_high_impact:
-            color, alpha = COLOR_HIGHLY_PROGRESSIVE, 0.95
-        elif is_prog:
-            color, alpha = COLOR_PROGRESSIVE, 0.88
-        else:
-            color, alpha = COLOR_SUCCESS, ALPHA_SUCCESS
-
-        pitch.arrows(
-            row["x_start"],
-            row["y_start"],
-            row["x_end"],
-            row["y_end"],
-            color=color,
-            width=1.3 * scale,
-            headwidth=2.0 * scale,
-            headlength=2.0 * scale,
-            ax=ax,
-            zorder=3,
-            alpha=alpha,
+    if top.empty:
+        ax.text(
+            60, 40, "Sem ações com ΔxT positivo",
+            ha="center", va="center", color="white", fontsize=9,
         )
-        pitch.scatter(
-            row["x_start"],
-            row["y_start"],
-            s=PASS_START_MARKER_SIZE,
-            marker="o",
-            color=color,
-            edgecolors="white",
-            linewidths=0.4,
-            ax=ax,
-            zorder=6,
-            alpha=alpha,
-        )
+    else:
+        passes = top[top["category"] == "passes"]
+        carries = top[top["category"] == "ball-carries"]
+        pass_vmax = max(float(passes["delta_xt"].max()), 0.01) if not passes.empty else 0.01
+        carry_vmax = max(float(carries["delta_xt"].max()), 0.01) if not carries.empty else 0.01
 
-    legend_handles = [
-        Line2D([0], [0], color=COLOR_SUCCESS, lw=2.0 * scale, label="Completado", alpha=0.65),
-        Line2D([0], [0], color=COLOR_PROGRESSIVE, lw=2.0 * scale, label="Progressivo (Wyscout)", alpha=0.90),
-        Line2D([0], [0], color=COLOR_HIGHLY_PROGRESSIVE, lw=2.0 * scale, label="High Impact (xT v3)", alpha=0.95),
-        Line2D([0], [0], color=COLOR_FAIL, lw=2.0 * scale, label="Incompleto", alpha=0.90),
-    ]
-    _add_map_legend(ax, legend_handles)
+        if not passes.empty:
+            norm_pass = Normalize(vmin=0, vmax=pass_vmax)
+            for _, row in passes.iterrows():
+                color = CMAP_PASS(norm_pass(row["delta_xt"]))
+                pitch.arrows(
+                    row["x_start"], row["y_start"],
+                    row["x_end"], row["y_end"],
+                    color=color, width=2.0 * scale, headwidth=3.0 * scale,
+                    headlength=3.0 * scale, ax=ax, zorder=3, alpha=0.92,
+                )
+                pitch.scatter(
+                    row["x_start"], row["y_start"],
+                    s=PASS_START_MARKER_SIZE + 20, marker="o", color=color,
+                    edgecolors="white", linewidths=0.5, ax=ax, zorder=6, alpha=0.95,
+                )
+
+        if not carries.empty:
+            norm_carry = Normalize(vmin=0, vmax=carry_vmax)
+            for _, row in carries.iterrows():
+                color = CMAP_CARRY(norm_carry(row["delta_xt"]))
+                pitch.arrows(
+                    row["x_start"], row["y_start"],
+                    row["x_end"], row["y_end"],
+                    color=color, width=2.4 * scale, headwidth=3.4 * scale,
+                    headlength=3.4 * scale, ax=ax, zorder=3, alpha=0.92,
+                )
+                pitch.scatter(
+                    row["x_end"], row["y_end"],
+                    s=CARRY_START_MARKER_SIZE + 30, marker="s", color=color,
+                    edgecolors="white", linewidths=0.5, ax=ax, zorder=6, alpha=0.95,
+                )
+
+        legend_handles = [
+            Line2D([0], [0], color=CMAP_PASS(0.85), lw=2.2 * scale, label="Passe (ΔxT)"),
+            Line2D([0], [0], color=CMAP_CARRY(0.85), lw=2.2 * scale, label="Condução (ΔxT)"),
+        ]
+        _add_map_legend(ax, legend_handles)
+
+    ax.set_title(
+        f"{player_name}\nTop {TOP_DELTAXT_N} ΔxT (3 jogos)",
+        color="white", fontsize=9.5 * scale, pad=6,
+    )
     _attack_arrow(fig)
     return _save_fig(fig), fig
 
 
-def draw_carry_map(df: pd.DataFrame):
-    carries = df[df["category"] == "ball-carries"].copy()
-    fig, ax, pitch = _base_pitch()
-    scale = _map_scale()
-
-    for _, row in carries.iterrows():
-        if not row["has_end"]:
-            continue
-        is_high_impact = bool(row.get("high_impact_carry", False))
-        is_impact = bool(row.get("impact_carry", False))
-        if is_high_impact:
-            color, alpha = COLOR_HIGHLY_PROGRESSIVE, 0.95
-        elif is_impact:
-            color, alpha = COLOR_PROGRESSIVE, 0.88
-        else:
-            color, alpha = COLOR_CARRY, COLOR_CARRY_BASE_ALPHA
-
-        pitch.arrows(
-            row["x_start"],
-            row["y_start"],
-            row["x_end"],
-            row["y_end"],
-            color=color,
-            width=1.3 * scale,
-            headwidth=2.0 * scale,
-            headlength=2.0 * scale,
-            ax=ax,
-            zorder=3,
-            alpha=alpha,
-        )
-        pitch.scatter(
-            row["x_start"],
-            row["y_start"],
-            s=CARRY_START_MARKER_SIZE,
-            marker="o",
-            color=color,
-            edgecolors="white",
-            linewidths=0.4,
-            ax=ax,
-            zorder=6,
-            alpha=alpha,
-        )
-
-    legend_handles = [
-        Line2D([0], [0], color=COLOR_CARRY, lw=2.0 * scale, label="Condução", alpha=0.65),
-        Line2D([0], [0], color=COLOR_PROGRESSIVE, lw=2.0 * scale, label="Impact (xT v3)", alpha=0.90),
-        Line2D([0], [0], color=COLOR_HIGHLY_PROGRESSIVE, lw=2.0 * scale, label="High Impact (xT v3)", alpha=0.95),
-    ]
-    _add_map_legend(ax, legend_handles)
-    _attack_arrow(fig)
-    return _save_fig(fig), fig
+@st.cache_data(show_spinner=False)
+def load_all_three_players() -> dict[str, pd.DataFrame]:
+    return {
+        player["code"]: load_player_all_matches(player["code"], player["name"])
+        for player in PLAYERS
+    }
 
 
-def render_maps(df: pd.DataFrame):
-    col_pass, col_carry = st.columns(2)
+def render_comparison(player_data: dict[str, pd.DataFrame]) -> None:
+    map_cols = st.columns(3)
+    for col, player in zip(map_cols, PLAYERS):
+        with col:
+            st.markdown(f'<div class="player-header">{player["name"]}</div>', unsafe_allow_html=True)
+            st.markdown(
+                f'<div class="player-sub">Top {TOP_DELTAXT_N} ΔxT · passes + conduções</div>',
+                unsafe_allow_html=True,
+            )
+            df = player_data[player["code"]]
+            if df.empty:
+                st.warning(f"Sem dados para {player['name']}.")
+            else:
+                img, fig = draw_top_deltaxt_map(df, player["name"])
+                plt.close(fig)
+                st.image(img, use_container_width=True)
 
-    with col_pass:
-        st.markdown('<div class="map-label">Mapa de Passes</div>', unsafe_allow_html=True)
-        if (df["category"] == "passes").any():
-            img_pass, fig_pass = draw_pass_map(df)
-            plt.close(fig_pass)
-            st.image(img_pass, use_container_width=True)
-        else:
-            st.info("Sem passes no recorte selecionado.")
-
-    with col_carry:
-        st.markdown('<div class="map-label">Mapa de Conduções</div>', unsafe_allow_html=True)
-        if (df["category"] == "ball-carries").any():
-            img_carry, fig_carry = draw_carry_map(df)
-            plt.close(fig_carry)
-            st.image(img_carry, use_container_width=True)
-        else:
-            st.info("Sem conduções no recorte selecionado.")
+    st.markdown("---")
+    st.markdown("### Impact")
+    stat_cols = st.columns(3)
+    for col, player in zip(stat_cols, PLAYERS):
+        with col:
+            df = player_data[player["code"]]
+            if not df.empty:
+                render_impact_card(compute_player_stats(df), player["tone"])
 
 
 # ── MAIN ─────────────────────────────────────────────────────
-st.sidebar.markdown(
+st.markdown(
     """
-    <div style="text-align:center;">
-      <h2 style="margin:0;color:#eef1f7;">Player Analysis</h2>
-      <p style="color:#94a3b8;font-size:0.9rem;">Mapa de ações por jogador</p>
+    <div style="text-align:center;margin-bottom:1rem;">
+      <h1 style="margin:0;color:#eef1f7;">WC Player Analysis — Top ΔxT</h1>
+      <p style="color:#94a3b8;font-size:0.95rem;margin-top:0.35rem;">
+        Bruno Guimarães · Casemiro · Lucas Paquetá — xT Heurístico v3
+      </p>
     </div>
     """,
     unsafe_allow_html=True,
 )
-st.sidebar.markdown("---")
-st.sidebar.caption("Impacto: xT Heurístico v3 · Progressivos: Wyscout")
 
-players = load_all_players()
-
-if not players:
+player_data = load_all_three_players()
+if not any(not df.empty for df in player_data.values()):
     st.error(
-        "Nenhum arquivo `.csv` encontrado no diretório do app. "
-        "Adicione arquivos como `enzo.csv` com as colunas esperadas."
+        "Nenhum CSV de jogador encontrado. "
+        "Esperado: `BG-vs *.csv`, `CS-vs *.csv`, `LP-vs *.csv`."
     )
     st.stop()
 
-player_keys = list(players.keys())
-selected_player = st.sidebar.selectbox(
-    "Jogador",
-    options=player_keys,
-    format_func=lambda k: players[k]["player"].iloc[0],
-)
-
-df = players[selected_player]
-player_name = df["player"].iloc[0]
-source_file = df["source_file"].iloc[0]
-
-available_categories = sorted(df["category"].unique())
-selected_categories = st.sidebar.multiselect(
-    "Categorias",
-    options=available_categories,
-    default=available_categories,
-    format_func=lambda c: CATEGORY_LABELS.get(c, c.title()),
-)
-
-outcome_filter = st.sidebar.radio(
-    "Resultado",
-    options=["all", "success", "fail"],
-    format_func=lambda v: {"all": "Todos", "success": "Sucesso", "fail": "Falha"}[v],
-    horizontal=True,
-)
-
-filtered = df[df["category"].isin(selected_categories)].copy()
-if outcome_filter == "success":
-    filtered = filtered[filtered["is_success"] | (filtered["category"] == "ball-carries")]
-elif outcome_filter == "fail":
-    filtered = filtered[~filtered["is_success"] & (filtered["category"] != "ball-carries")]
-
-stats = compute_player_stats(filtered)
-
-st.markdown(f"## {player_name}")
-st.caption(
-    f"Fonte: `{source_file}` · {stats['total_actions']} ações · "
-    f"xT Heurístico v3 em passes e conduções"
-)
-
-if filtered.empty:
-    st.info("Nenhuma ação para os filtros selecionados.")
-else:
-    render_maps(filtered)
-
-st.markdown("---")
-st.markdown("### Estatísticas")
-render_player_cards(stats)
-
-st.markdown("#### Por tipo de ação")
-type_rows = [
-    {
-        "Tipo": ACTION_TYPE_LABELS.get(k, k),
-        "Categoria": CATEGORY_LABELS.get(
-            filtered.loc[filtered["action_type"] == k, "category"].iloc[0]
-            if (filtered["action_type"] == k).any()
-            else "",
-            "",
-        ),
-        "Quantidade": v,
-    }
-    for k, v in sorted(stats["by_action_type"].items(), key=lambda item: -item[1])
-]
-st.dataframe(pd.DataFrame(type_rows), use_container_width=True, hide_index=True)
-
-with st.expander("Dados detalhados"):
-    display_cols = [
-        "row_id",
-        "category",
-        "action_type",
-        "is_success",
-        "is_key_pass",
-        "is_long_ball",
-        "progressive",
-        "impact_pass",
-        "high_impact_pass",
-        "impact_carry",
-        "high_impact_carry",
-        "delta_xt",
-        "x_start",
-        "y_start",
-        "x_end",
-        "y_end",
-    ]
-    st.dataframe(
-        filtered[display_cols].rename(
-            columns={
-                "row_id": "#",
-                "category": "Categoria",
-                "action_type": "Ação",
-                "is_success": "Sucesso",
-                "is_key_pass": "Key Pass",
-                "is_long_ball": "Bola longa",
-                "progressive": "Progressivo",
-                "impact_pass": "Impact Pass",
-                "high_impact_pass": "High Impact",
-                "impact_carry": "Impact Carry",
-                "high_impact_carry": "High Impact Carry",
-                "delta_xt": "ΔxT v3",
-                "x_start": "X início",
-                "y_start": "Y início",
-                "x_end": "X fim",
-                "y_end": "Y fim",
-            }
-        ),
-        use_container_width=True,
-        hide_index=True,
-    )
+render_comparison(player_data)
