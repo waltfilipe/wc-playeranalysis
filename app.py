@@ -60,7 +60,7 @@ ARROW_HEADLENGTH = 1.15
 ARROW_ALPHA = 0.68
 ARROW_ALPHA_EMPH = 0.82
 ALL_MATCHES_LABEL = "All Matches"
-DATA_CACHE_VERSION = 7
+DATA_CACHE_VERSION = 8
 XT_ZONE_COLS = 3
 XT_ZONE_ROWS = 2
 NX_XT = 16
@@ -548,16 +548,16 @@ def pool_grid_average(grid: np.ndarray, out_cols: int, out_rows: int) -> np.ndar
 
 # ── xT HEURÍSTICO v3q (18×12 → 24 quadrantes 6×4) ─────────────
 @st.cache_data(show_spinner=False)
-def _v3q_base_grid_18x12() -> np.ndarray:
+def _v3q_base_grid_18x12(_cache_version: int = DATA_CACHE_VERSION) -> np.ndarray:
     """18×12 v3c surface used as input for 6×4 pooling."""
     fine = compute_heuristic_v3c_fine_grid()
     return zone_xt_means(fine, n_x=NX_XT_V3S, n_y=NY_XT)
 
 
 @st.cache_data(show_spinner=False)
-def compute_heuristic_v3q_pooled_grid() -> np.ndarray:
+def compute_heuristic_v3q_pooled_grid(_cache_version: int = DATA_CACHE_VERSION) -> np.ndarray:
     """6×4 grid (24 quadrantes): each cell is the mean of a 3×3 block from 18×12."""
-    base = _v3q_base_grid_18x12()
+    base = _v3q_base_grid_18x12(_cache_version)
     return pool_grid_average(base, out_cols=NX_XT_V3Q, out_rows=NY_XT_V3Q)
 
 
@@ -570,7 +570,11 @@ def _build_heuristic_v3q_threat_surface(Xc: np.ndarray, Yc: np.ndarray) -> np.nd
 
 
 @st.cache_data(show_spinner=False)
-def compute_heuristic_v3q_fine_grid(nx: int = XT_V3_FINE_NX, ny: int = XT_V3_FINE_NY) -> np.ndarray:
+def compute_heuristic_v3q_fine_grid(
+    nx: int = XT_V3_FINE_NX,
+    ny: int = XT_V3_FINE_NY,
+    _cache_version: int = DATA_CACHE_VERSION,
+) -> np.ndarray:
     xe = np.linspace(0.0, FIELD_X, nx)
     ye = np.linspace(0.0, FIELD_Y, ny)
     Xc, Yc = np.meshgrid(xe, ye)
@@ -579,10 +583,10 @@ def compute_heuristic_v3q_fine_grid(nx: int = XT_V3_FINE_NX, ny: int = XT_V3_FIN
 
 @st.cache_data(show_spinner=False)
 def compute_heuristic_v3q_xt_grid(
-    n_x: int = NX_XT_V3Q, n_y: int = NY_XT_V3Q,
+    _cache_version: int = DATA_CACHE_VERSION,
 ) -> np.ndarray:
-    fine = compute_heuristic_v3q_fine_grid()
-    grid = zone_xt_means(fine, n_x=n_x, n_y=n_y)
+    """Display grid: 6×4 pooled directly from the 18×12 v3c surface."""
+    grid = compute_heuristic_v3q_pooled_grid(_cache_version)
     return _enforce_row_monotonic_x(grid)
 
 
@@ -1303,8 +1307,11 @@ def draw_xt_grid_map(
     n_y: int | None = None,
 ):
     """Pitch grid with xT value labeled in each cell (Hudson-style)."""
-    cols = n_x if n_x is not None else grid.shape[1]
-    rows = n_y if n_y is not None else grid.shape[0]
+    grid_rows, grid_cols = grid.shape
+    cols = n_x if n_x is not None else grid_cols
+    rows = n_y if n_y is not None else grid_rows
+    if cols != grid_cols or rows != grid_rows:
+        cols, rows = grid_cols, grid_rows
     pitch = Pitch(pitch_type="statsbomb", pitch_color="#1a1a2e", line_color="#ffffff", line_alpha=0.95)
     fig, ax = pitch.draw(figsize=(7.8, 5.2))
     fig.set_facecolor("#1a1a2e")
