@@ -115,7 +115,7 @@ XT_V5_MAX_DELTA_BOX = 0.52
 # xT Heurístico v3.1 — transições suaves e salto reduzido na linha de meio
 XT_MODEL_HEURISTIC_V31 = "heuristic_v31"
 XT_V31_ZONE_BLEND_WIDTH = 48.0
-XT_V31_LAT_DISC_MAX = 0.03
+XT_V31_LAT_DISC_MAX = 0.06
 XT_V31_LAT_GATE_X = HALF_LINE_X
 XT_V31_GAUSS_SIGMA_X = 3.5
 XT_V31_GAUSS_SIGMA_Y = 0.0
