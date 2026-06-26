@@ -100,7 +100,9 @@ XT_V5_MAX_DELTA_BOX = 0.52
 CARD_TITLE_TEXT = "14px"
 CARD_LABEL_TEXT = "16px"
 CARD_INNER_BORDER = "rgba(107,114,128,0.45)"
-PLAYER_TONE = "#5b9bd5"
+CARD_TONE_OVERVIEW = "#5b9bd5"
+CARD_TONE_PASSES = "#22c55e"
+CARD_TONE_IMPACT = "#a855f7"
 
 COLOR_SUCCESS = "#c8c8c8"
 COLOR_PROGRESSIVE = "#2F80ED"
@@ -137,8 +139,10 @@ ACTION_TYPE_LABELS = {
 
 # ── COORDINATE HELPERS ───────────────────────────────────────
 def wyscout_to_statsbomb(x: float, y: float) -> tuple[float, float]:
-    """Wyscout 0–100 → StatsBomb 120×80."""
-    return x * FIELD_X / WYSCOUT_PITCH_SIZE, y * FIELD_Y / WYSCOUT_PITCH_SIZE
+    """Wyscout 0–100 → StatsBomb 120×80; espelha Y para corrigir corredores laterais."""
+    x_sb = x * FIELD_X / WYSCOUT_PITCH_SIZE
+    y_sb = FIELD_Y - (y * FIELD_Y / WYSCOUT_PITCH_SIZE)
+    return x_sb, y_sb
 
 
 def distance_to_goal(x: float, y: float) -> float:
@@ -619,43 +623,48 @@ def stats_section_card(title: str, border_color: str, items: list[tuple[str, str
     st.markdown(_stats_card_shell_html(title, border_color, inner), unsafe_allow_html=True)
 
 
-def render_player_cards(stats: dict, tone: str) -> None:
+def render_player_cards(stats: dict) -> None:
     wyscout = stats["progressive_wyscout"]
     impact = stats["impact_pass"]
     high_impact = stats["high_impact_pass"]
     carry_impact = stats["impact_carry"]
     carry_high = stats["high_impact_carry"]
-    stats_section_card(
-        "Overview",
-        tone,
-        [
-            ("Total Passes", f"{stats['total_passes']:.0f}"),
-            ("% Accuracy", f"{stats['accuracy_pct']:.1f}%"),
-        ],
-    )
-    stats_section_card(
-        "Passes",
-        tone,
-        [
-            ("Passes Progressivos", f"{wyscout['successful']:.0f}"),
-            ("% Acurácia Progressiva", f"{wyscout['accuracy_pct']:.1f}%"),
-            ("Impact Passes", f"{impact['successful']:.0f}"),
-            ("% Acurácia Impact Passes", f"{impact['accuracy_pct']:.1f}%"),
-            ("High Impact Passes", f"{high_impact['successful']:.0f}"),
-            ("% Acurácia High Impact", f"{high_impact['accuracy_pct']:.1f}%"),
-        ],
-    )
-    stats_section_card(
-        "Impact",
-        tone,
-        [
-            ("Pass Impact (xT v3)", f"{stats['sum_dxt_passes']:.2f}"),
-            ("Carry Impact (xT v3)", f"{stats['sum_dxt_carries']:.2f}"),
-            ("Impact Carries", f"{carry_impact['successful']:.0f}"),
-            ("High Impact Carries", f"{carry_high['successful']:.0f}"),
-            ("% Positive Impact", f"{stats['pos_pct']:.1f}%"),
-        ],
-    )
+
+    col_overview, col_passes, col_impact = st.columns(3)
+    with col_overview:
+        stats_section_card(
+            "Overview",
+            CARD_TONE_OVERVIEW,
+            [
+                ("Total Passes", f"{stats['total_passes']:.0f}"),
+                ("% Accuracy", f"{stats['accuracy_pct']:.1f}%"),
+            ],
+        )
+    with col_passes:
+        stats_section_card(
+            "Passes",
+            CARD_TONE_PASSES,
+            [
+                ("Passes Progressivos", f"{wyscout['successful']:.0f}"),
+                ("% Acurácia Progressiva", f"{wyscout['accuracy_pct']:.1f}%"),
+                ("Impact Passes", f"{impact['successful']:.0f}"),
+                ("% Acurácia Impact Passes", f"{impact['accuracy_pct']:.1f}%"),
+                ("High Impact Passes", f"{high_impact['successful']:.0f}"),
+                ("% Acurácia High Impact", f"{high_impact['accuracy_pct']:.1f}%"),
+            ],
+        )
+    with col_impact:
+        stats_section_card(
+            "Impact",
+            CARD_TONE_IMPACT,
+            [
+                ("Pass Impact (xT v3)", f"{stats['sum_dxt_passes']:.2f}"),
+                ("Carry Impact (xT v3)", f"{stats['sum_dxt_carries']:.2f}"),
+                ("Impact Carries", f"{carry_impact['successful']:.0f}"),
+                ("High Impact Carries", f"{carry_high['successful']:.0f}"),
+                ("% Positive Impact", f"{stats['pos_pct']:.1f}%"),
+            ],
+        )
 
 
 # ── PITCH DRAWING ────────────────────────────────────────────
@@ -664,7 +673,6 @@ def _base_pitch(bg="#1a1a2e"):
     fig, ax = pitch.draw(figsize=(FIG_W, FIG_H))
     fig.set_facecolor(bg)
     fig.set_dpi(FIG_DPI)
-    ax.invert_xaxis()
     return fig, ax, pitch
 
 
@@ -696,8 +704,8 @@ def _attack_arrow(fig, has_cbar: bool = False):
     ox = -0.04 if has_cbar else 0.0
     fig.patches.append(
         FancyArrowPatch(
-            (0.56 + ox, 0.045),
             (0.44 + ox, 0.045),
+            (0.56 + ox, 0.045),
             transform=fig.transFigure,
             arrowstyle="-|>",
             mutation_scale=10 * scale,
@@ -926,7 +934,7 @@ else:
 
 st.markdown("---")
 st.markdown("### Estatísticas")
-render_player_cards(stats, PLAYER_TONE)
+render_player_cards(stats)
 
 st.markdown("#### Por tipo de ação")
 type_rows = [
