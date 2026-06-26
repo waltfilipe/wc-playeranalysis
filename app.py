@@ -60,7 +60,7 @@ ARROW_HEADLENGTH = 1.15
 ARROW_ALPHA = 0.68
 ARROW_ALPHA_EMPH = 0.82
 ALL_MATCHES_LABEL = "All Matches"
-DATA_CACHE_VERSION = 6
+DATA_CACHE_VERSION = 7
 XT_ZONE_COLS = 3
 XT_ZONE_ROWS = 2
 NX_XT = 16
@@ -131,10 +131,10 @@ XT_V3C_MAX_DELTA_BOX = 0.26
 # xT Heurístico v3s — idêntico ao v3c, grade de exibição 18×12
 XT_MODEL_HEURISTIC_V3S = "heuristic_v3s"
 
-# xT Heurístico v3q — grade 18×12 agregada em quadrantes 3×3 (média)
+# xT Heurístico v3q — grade 18×12 agregada em 24 quadrantes 6×4 (média)
 XT_MODEL_HEURISTIC_V3Q = "heuristic_v3q"
-NX_XT_V3Q = 3
-NY_XT_V3Q = 3
+NX_XT_V3Q = 6
+NY_XT_V3Q = 4
 
 CARD_TITLE_TEXT = "14px"
 CARD_LABEL_TEXT = "16px"
@@ -546,17 +546,17 @@ def pool_grid_average(grid: np.ndarray, out_cols: int, out_rows: int) -> np.ndar
     return pooled
 
 
-# ── xT HEURÍSTICO v3q (18×12 → quadrantes 3×3) ───────────────
+# ── xT HEURÍSTICO v3q (18×12 → 24 quadrantes 6×4) ─────────────
 @st.cache_data(show_spinner=False)
 def _v3q_base_grid_18x12() -> np.ndarray:
-    """18×12 v3c surface used as input for 3×3 pooling."""
+    """18×12 v3c surface used as input for 6×4 pooling."""
     fine = compute_heuristic_v3c_fine_grid()
     return zone_xt_means(fine, n_x=NX_XT_V3S, n_y=NY_XT)
 
 
 @st.cache_data(show_spinner=False)
 def compute_heuristic_v3q_pooled_grid() -> np.ndarray:
-    """3×3 grid: each cell is the mean of a 6×4 block from the 18×12 grid."""
+    """6×4 grid (24 quadrantes): each cell is the mean of a 3×3 block from 18×12."""
     base = _v3q_base_grid_18x12()
     return pool_grid_average(base, out_cols=NX_XT_V3Q, out_rows=NY_XT_V3Q)
 
@@ -1437,7 +1437,7 @@ def render_xt_model_comparison(
     st.caption(
         "Cada célula mostra o xT médio em percentual. "
         "**v3s** usa a **mesma lógica do v3c**, com grade **18×12**. "
-        "**v3q** agrupa a grade 18×12 em **quadrantes 3×3** (média de blocos 6×4)."
+        "**v3q** agrupa a grade 18×12 em **24 quadrantes (6×4)** — média de blocos 3×3."
     )
     grid_v3 = compute_heuristic_v3_xt_grid()
     grid_v3c = compute_heuristic_v3c_xt_grid()
@@ -1465,13 +1465,13 @@ def render_xt_model_comparison(
         st.image(img_gv3s, use_container_width=True)
         st.caption(f"18×12 · Máx: {grid_v3s.max():.3f} · Média: {grid_v3s.mean():.3f}")
     with grid_cols[3]:
-        st.markdown('<div class="map-label">Heurístico v3q (3×3)</div>', unsafe_allow_html=True)
+        st.markdown('<div class="map-label">Heurístico v3q (6×4)</div>', unsafe_allow_html=True)
         img_gv3q, fig_gv3q = draw_xt_grid_map(
             grid_v3q, "Heurístico v3q", as_percent=True, n_x=NX_XT_V3Q, n_y=NY_XT_V3Q,
         )
         plt.close(fig_gv3q)
         st.image(img_gv3q, use_container_width=True)
-        st.caption(f"3×3 · Máx: {grid_v3q.max():.3f} · Média: {grid_v3q.mean():.3f}")
+        st.caption(f"6×4 (24) · Máx: {grid_v3q.max():.3f} · Média: {grid_v3q.mean():.3f}")
 
     with st.expander("Superfície contínua xT"):
         surf_cols = st.columns(4)
@@ -1598,7 +1598,7 @@ with st.sidebar:
     st.markdown("---")
     match_options = [ALL_MATCHES_LABEL, *get_available_matches(player_data)]
     selected_match = st.selectbox("Selecionar partida", match_options, label_visibility="collapsed")
-    st.caption("xT v3 · v3c · v3s (= v3c, 18×12) · v3q (3×3) · Progressivos Wyscout")
+    st.caption("xT v3 · v3c · v3s (= v3c, 18×12) · v3q (24 quadrantes) · Progressivos Wyscout")
 
 tab_analysis, tab_compare = st.tabs(["Análise", "Comparar xT v3 / v3c / v3s / v3q"])
 
