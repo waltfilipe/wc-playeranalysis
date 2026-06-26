@@ -119,10 +119,12 @@ CMAP_CARRY = LinearSegmentedColormap.from_list(
 
 
 # ── COORDINATE HELPERS ───────────────────────────────────────
-def wyscout_to_statsbomb(x: float, y: float) -> tuple[float, float]:
-    """Wyscout 0–100 → StatsBomb 120×80; espelha Y para corrigir corredores laterais."""
+def wyscout_to_statsbomb(x: float, y: float, *, flip_x: bool = False) -> tuple[float, float]:
+    """Wyscout 0–100 → StatsBomb 120×80; espelha Y; flip X em jogos fora (isHome=false)."""
     x_sb = x * FIELD_X / WYSCOUT_PITCH_SIZE
     y_sb = FIELD_Y - (y * FIELD_Y / WYSCOUT_PITCH_SIZE)
+    if flip_x:
+        x_sb = FIELD_X - x_sb
     return x_sb, y_sb
 
 
@@ -461,12 +463,15 @@ def load_player_csv(path: Path) -> pd.DataFrame:
         raise ValueError(f"Colunas ausentes em {path.name}: {', '.join(sorted(missing))}")
 
     rows = []
+    is_home = _parse_bool(frame["isHome"].iloc[0]) if "isHome" in frame.columns and len(frame) else True
+    flip_x = not is_home
+
     for idx, row in frame.iterrows():
-        sx, sy = wyscout_to_statsbomb(float(row["start_x"]), float(row["start_y"]))
+        sx, sy = wyscout_to_statsbomb(float(row["start_x"]), float(row["start_y"]), flip_x=flip_x)
         has_end = _has_coords(row, "end")
         ex = ey = np.nan
         if has_end:
-            ex, ey = wyscout_to_statsbomb(float(row["end_x"]), float(row["end_y"]))
+            ex, ey = wyscout_to_statsbomb(float(row["end_x"]), float(row["end_y"]), flip_x=flip_x)
 
         rows.append(
             {
@@ -537,6 +542,7 @@ def compute_player_stats(df: pd.DataFrame) -> dict:
             "high_impact_carry": empty_cls.copy(),
             "sum_dxt_passes": 0.0,
             "sum_dxt_carries": 0.0,
+            "sum_xt_end_passes": 0.0,
             "pos_pct": 0.0,
             "carries_total": len(carries),
             "defensive_total": int((df["category"] == "defensive").sum()),
@@ -560,6 +566,8 @@ def compute_player_stats(df: pd.DataFrame) -> dict:
     pos_count = int((xt_actions["delta_xt"] > 0).sum())
     pos_pct = (pos_count / len(xt_actions) * 100.0) if len(xt_actions) else 0.0
 
+    completed_passes = passes[passes["is_success"]]
+
     return {
         "total_passes": total_passes,
         "accuracy_pct": accuracy,
@@ -570,6 +578,7 @@ def compute_player_stats(df: pd.DataFrame) -> dict:
         "high_impact_carry": high_impact_carry,
         "sum_dxt_passes": float(passes["delta_xt"].sum()),
         "sum_dxt_carries": float(carries["delta_xt"].sum()),
+        "sum_xt_end_passes": float(completed_passes["xt_end"].sum()) if not completed_passes.empty else 0.0,
         "pos_pct": pos_pct,
         "carries_total": len(carries),
         "defensive_total": int((df["category"] == "defensive").sum()),
@@ -636,6 +645,7 @@ def render_impact_card(stats: dict, tone: str) -> None:
         tone,
         [
             ("Pass Impact (xT v3)", f"{stats['sum_dxt_passes']:.2f}"),
+            ("Σ xT final passes", f"{stats['sum_xt_end_passes']:.2f}"),
             ("Carry Impact (xT v3)", f"{stats['sum_dxt_carries']:.2f}"),
             ("Total Impact (xT v3)", f"{stats['sum_dxt_passes'] + stats['sum_dxt_carries']:.2f}"),
             ("Impact Passes", f"{impact['successful']:.0f}"),
