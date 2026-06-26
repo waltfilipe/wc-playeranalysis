@@ -60,7 +60,7 @@ ARROW_HEADLENGTH = 1.15
 ARROW_ALPHA = 0.68
 ARROW_ALPHA_EMPH = 0.82
 ALL_MATCHES_LABEL = "All Matches"
-DATA_CACHE_VERSION = 11
+DATA_CACHE_VERSION = 12
 XT_ZONE_COLS = 3
 XT_ZONE_ROWS = 2
 NX_XT = 16
@@ -115,7 +115,8 @@ XT_V5_MAX_DELTA_BOX = 0.52
 # xT Heurístico v3.1 — transições suaves e salto reduzido na linha de meio
 XT_MODEL_HEURISTIC_V31 = "heuristic_v31"
 XT_V31_ZONE_BLEND_WIDTH = 48.0
-XT_V31_LAT_DISC_MAX = 0.12
+XT_V31_LAT_DISC_MAX = 0.05
+XT_V31_LAT_GATE_X = HALF_LINE_X
 XT_V31_GAUSS_SIGMA_X = 3.5
 XT_V31_GAUSS_SIGMA_Y = 2.0
 XT_V31_COL_SMOOTH_KERNEL = (0.22, 0.56, 0.22)
@@ -412,7 +413,7 @@ def _map_zonal_threat_v31(x: np.ndarray) -> np.ndarray:
 def _location_factor_v31(x: np.ndarray, y: np.ndarray) -> np.ndarray:
     lat = _lateral_relative_position(y)
     depth = np.clip(
-        (x - OPT_ATTACKING_TWO_THIRDS_X) / (FIELD_X - OPT_ATTACKING_TWO_THIRDS_X),
+        (x - XT_V31_LAT_GATE_X) / (FIELD_X - XT_V31_LAT_GATE_X),
         0.0,
         1.0,
     )
@@ -1367,7 +1368,7 @@ def render_xt_model_comparison(
             "xt_end_col": "xt_end_v31",
             "desc": (
                 "Blend amplo (48 m) + gaussiana (σx=3.5) + rampa 5.0/7.8 pp por coluna. "
-                "Salto reduzido na linha de meio; centro > laterais no campo ofensivo."
+                "Penalização lateral suave (5%) apenas no campo ofensivo."
             ),
         },
     ]
