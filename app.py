@@ -9,7 +9,7 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 from matplotlib.lines import Line2D
-from matplotlib.patches import FancyArrowPatch
+from matplotlib.patches import FancyArrowPatch, Rectangle
 from matplotlib.colors import LinearSegmentedColormap, Normalize
 from mplsoccer import Pitch
 from PIL import Image
@@ -60,6 +60,9 @@ ARROW_HEADLENGTH = 1.15
 ARROW_ALPHA = 0.68
 ARROW_ALPHA_EMPH = 0.82
 ALL_MATCHES_LABEL = "All Matches"
+DATA_CACHE_VERSION = 2
+XT_ZONE_COLS = 3
+XT_ZONE_ROWS = 2
 WYSCOUT_PITCH_SIZE = 100.0
 OPT_ATTACKING_TWO_THIRDS_X = 40.0
 WYSCOUT_PROG_OWN_HALF = 30.0
@@ -592,6 +595,30 @@ def enrich_with_xt_v3(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+def ensure_xt_model_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """Backfill v3c columns when serving cached frames from older app versions."""
+    if df.empty or "delta_xt_v3c" in df.columns:
+        return df
+
+    out = df.copy()
+    for col in ("xt_start_v3c", "xt_end_v3c", "delta_xt_v3c"):
+        out[col] = 0.0
+
+    xt_mask = out["category"].isin(["passes", "ball-carries"]) & out["has_end"]
+    if xt_mask.any():
+        xt_df_v3c = apply_heuristic_v3c_xt(out.loc[xt_mask].copy())
+        out.loc[xt_mask, ["xt_start_v3c", "xt_end_v3c", "delta_xt_v3c"]] = xt_df_v3c[
+            ["xt_start_v3c", "xt_end_v3c", "delta_xt_v3c"]
+        ].values
+    return out
+
+
+def _safe_col_sum(df: pd.DataFrame, col: str) -> float:
+    if col not in df.columns or df.empty:
+        return 0.0
+    return float(pd.to_numeric(df[col], errors="coerce").fillna(0.0).sum())
+
+
 # ── DATA LOADING ─────────────────────────────────────────────
 def discover_csv_files(base_dir: Path | None = None) -> list[Path]:
     root = base_dir or Path(__file__).resolve().parent
@@ -1086,8 +1113,81 @@ def draw_xt_threat_surface(grid: np.ndarray, title: str, vmax: float):
     return _save_fig(fig), fig
 
 
+def zone_xt_means(grid: np.ndarray, n_x: int = XT_ZONE_COLS, n_y: int = XT_ZONE_ROWS) -> np.ndarray:
+    """Mean xT per pitch zone from the fine threat grid."""
+    ny, nx = grid.shape
+    zones = np.zeros((n_y, n_x), dtype=float)
+    for iy in range(n_y):
+        y_start = int(iy * ny / n_y)
+        y_end = int((iy + 1) * ny / n_y)
+        for ix in range(n_x):
+            x_start = int(ix * nx / n_x)
+            x_end = int((ix + 1) * nx / n_x)
+            zones[iy, ix] = float(grid[y_start:y_end, x_start:x_end].mean())
+    return zones
+
+
+def _zone_name(ix: int, iy: int, n_x: int, n_y: int) -> str:
+    thirds = ["Defesa", "Meio", "Ataque"] if n_x == 3 else ["Esquerda", "Direita"]
+    halves = ["Corredor inf.", "Corredor sup."] if n_y == 2 else ["Baixo", "Cima"]
+    x_label = thirds[min(ix, len(thirds) - 1)] if n_x == 3 else thirds[min(ix, len(thirds) - 1)]
+    y_label = halves[iy]
+    return f"{x_label}\n{y_label}"
+
+
+def draw_xt_zone_map(
+    grid: np.ndarray,
+    title: str,
+    vmax: float,
+    *,
+    n_x: int = XT_ZONE_COLS,
+    n_y: int = XT_ZONE_ROWS,
+):
+    """Pitch map with mean xT value labeled in each zone."""
+    zone_means = zone_xt_means(grid, n_x=n_x, n_y=n_y)
+    pitch = Pitch(pitch_type="statsbomb", pitch_color="#1a1a2e", line_color="#ffffff", line_alpha=0.95)
+    fig, ax = pitch.draw(figsize=(FIG_W, FIG_H))
+    fig.set_facecolor("#1a1a2e")
+    fig.set_dpi(FIG_DPI)
+    scale = _map_scale()
+    cmap = plt.cm.magma
+    norm = Normalize(vmin=0, vmax=vmax)
+
+    for iy in range(n_y):
+        for ix in range(n_x):
+            x0 = ix * FIELD_X / n_x
+            x1 = (ix + 1) * FIELD_X / n_x
+            y0 = iy * FIELD_Y / n_y
+            y1 = (iy + 1) * FIELD_Y / n_y
+            val = zone_means[iy, ix]
+            ax.add_patch(
+                Rectangle(
+                    (x0, y0), x1 - x0, y1 - y0,
+                    facecolor=cmap(norm(val)), edgecolor="#ffffff",
+                    linewidth=1.0, alpha=0.72, zorder=1,
+                )
+            )
+            ax.text(
+                (x0 + x1) / 2, (y0 + y1) / 2,
+                f"{val:.3f}",
+                ha="center", va="center", color="white",
+                fontsize=7.5 * scale, fontweight="bold", zorder=4,
+            )
+            ax.text(
+                (x0 + x1) / 2, y0 + (y1 - y0) * 0.18,
+                _zone_name(ix, iy, n_x, n_y),
+                ha="center", va="center", color="#d1d5db",
+                fontsize=5.2 * scale, zorder=4,
+            )
+
+    pitch.draw(ax=ax)
+    ax.set_title(title, color="white", fontsize=8.8 * scale, pad=5)
+    _attack_arrow(fig)
+    return _save_fig(fig), fig
+
+
 @st.cache_data(show_spinner=False)
-def load_all_three_players() -> dict[str, pd.DataFrame]:
+def load_all_three_players(_cache_version: int = DATA_CACHE_VERSION) -> dict[str, pd.DataFrame]:
     return {
         player["code"]: load_player_all_matches(player["code"], player["name"])
         for player in PLAYERS
@@ -1168,6 +1268,23 @@ def render_xt_model_comparison(
         st.image(img_v3c, use_container_width=True)
         st.caption(f"Máx: {grid_v3c.max():.3f} · Média: {grid_v3c.mean():.3f}")
 
+    st.markdown("### xT médio por zona do campo")
+    st.caption(
+        f"Campo dividido em {XT_ZONE_COLS}×{XT_ZONE_ROWS} zonas "
+        "(terços horizontais × corredores verticais) com valor médio da superfície xT."
+    )
+    zone_cols = st.columns(2)
+    with zone_cols[0]:
+        st.markdown('<div class="map-label">Zonas · v3</div>', unsafe_allow_html=True)
+        img_zv3, fig_zv3 = draw_xt_zone_map(grid_v3, "xT por zona · v3", XT_V3_SURFACE_MAX)
+        plt.close(fig_zv3)
+        st.image(img_zv3, use_container_width=True)
+    with zone_cols[1]:
+        st.markdown('<div class="map-label">Zonas · v3c</div>', unsafe_allow_html=True)
+        img_zv3c, fig_zv3c = draw_xt_zone_map(grid_v3c, "xT por zona · v3c", XT_V3C_SURFACE_MAX)
+        plt.close(fig_zv3c)
+        st.image(img_zv3c, use_container_width=True)
+
     st.markdown("---")
     st.markdown("### Top 10 ΔxT — v3 vs v3c")
 
@@ -1181,12 +1298,13 @@ def render_xt_model_comparison(
             continue
 
         xt_actions = df[df["category"].isin(["passes", "ball-carries"]) & df["has_end"]]
+        passes = df[df["category"] == "passes"]
         summary_rows.append({
             "Jogador": player["name"],
-            "Σ ΔxT v3": round(float(xt_actions["delta_xt"].sum()), 3),
-            "Σ ΔxT v3c": round(float(xt_actions["delta_xt_v3c"].sum()), 3),
-            "Σ xT final v3": round(float(df[df["category"] == "passes"]["xt_end"].sum()), 3),
-            "Σ xT final v3c": round(float(df[df["category"] == "passes"]["xt_end_v3c"].sum()), 3),
+            "Σ ΔxT v3": round(_safe_col_sum(xt_actions, "delta_xt"), 3),
+            "Σ ΔxT v3c": round(_safe_col_sum(xt_actions, "delta_xt_v3c"), 3),
+            "Σ xT final v3": round(_safe_col_sum(passes, "xt_end"), 3),
+            "Σ xT final v3c": round(_safe_col_sum(passes, "xt_end_v3c"), 3),
         })
 
         cmp_cols = st.columns(2)
@@ -1226,7 +1344,10 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-player_data = load_all_three_players()
+player_data = {
+    code: ensure_xt_model_columns(df)
+    for code, df in load_all_three_players().items()
+}
 if not any(not df.empty for df in player_data.values()):
     st.error(
         "Nenhum CSV de jogador encontrado. "
