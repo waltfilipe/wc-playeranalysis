@@ -63,6 +63,11 @@ ALL_MATCHES_LABEL = "All Matches"
 DATA_CACHE_VERSION = 2
 XT_ZONE_COLS = 3
 XT_ZONE_ROWS = 2
+NX_XT = 16
+NY_XT = 12
+XT_GRID_CMAP = LinearSegmentedColormap.from_list(
+    "xt_grid", ["#1a1a2e", "#3b82f6", "#fbbf24", "#ef4444"]
+)
 WYSCOUT_PITCH_SIZE = 100.0
 OPT_ATTACKING_TWO_THIRDS_X = 40.0
 WYSCOUT_PROG_OWN_HALF = 30.0
@@ -275,6 +280,26 @@ def _build_heuristic_v3_threat_surface(Xc: np.ndarray, Yc: np.ndarray) -> np.nda
     surface = zonal * _location_factor_v3(Xc, Yc) * _v4_xg_finishing_factor(Xc, Yc)
     surface = np.clip(surface, 0.0, XT_V3_SURFACE_MAX)
     return _enforce_row_monotonic_x(surface)
+
+
+@st.cache_data(show_spinner=False)
+def compute_heuristic_v3_xt_grid(
+    n_x: int = NX_XT, n_y: int = NY_XT,
+) -> np.ndarray:
+    """16×12 display grid sampled from the v3 fine threat surface."""
+    fine = compute_heuristic_v3_fine_grid()
+    grid = zone_xt_means(fine, n_x=n_x, n_y=n_y)
+    return _enforce_row_monotonic_x(grid)
+
+
+@st.cache_data(show_spinner=False)
+def compute_heuristic_v3c_xt_grid(
+    n_x: int = NX_XT, n_y: int = NY_XT,
+) -> np.ndarray:
+    """16×12 display grid sampled from the v3c fine threat surface."""
+    fine = compute_heuristic_v3c_fine_grid()
+    grid = zone_xt_means(fine, n_x=n_x, n_y=n_y)
+    return _enforce_row_monotonic_x(grid)
 
 
 @st.cache_data(show_spinner=False)
@@ -1113,6 +1138,68 @@ def draw_xt_threat_surface(grid: np.ndarray, title: str, vmax: float):
     return _save_fig(fig), fig
 
 
+def draw_xt_grid_map(
+    grid: np.ndarray,
+    title: str,
+    *,
+    as_percent: bool = True,
+    color_percentile: tuple[float, float] | None = (5, 95),
+    value_fmt: str = ".2f",
+):
+    """16×12 pitch grid with xT value labeled in each cell (Hudson-style)."""
+    pitch = Pitch(pitch_type="statsbomb", pitch_color="#1a1a2e", line_color="#ffffff", line_alpha=0.95)
+    fig, ax = pitch.draw(figsize=(7.8, 5.2))
+    fig.set_facecolor("#1a1a2e")
+    fig.set_dpi(FIG_DPI)
+    scale = 7.8 / MAP_REF_WIDTH
+
+    x_bins = np.linspace(0, FIELD_X, NX_XT + 1)
+    y_bins = np.linspace(0, FIELD_Y, NY_XT + 1)
+    if color_percentile is not None:
+        vmin = float(np.percentile(grid, color_percentile[0]))
+        vmax = float(np.percentile(grid, color_percentile[1]))
+    else:
+        vmin = 0.0
+        vmax = max(float(grid.max()), 1e-6)
+    if vmax <= vmin:
+        vmax = vmin + 1e-6
+
+    norm = Normalize(vmin=vmin, vmax=vmax)
+    threshold = vmin + (vmax - vmin) * 0.45
+
+    for iy in range(NY_XT):
+        for ix in range(NX_XT):
+            value = float(grid[iy, ix])
+            x0, x1 = x_bins[ix], x_bins[ix + 1]
+            y0, y1 = y_bins[iy], y_bins[iy + 1]
+            ax.add_patch(
+                Rectangle(
+                    (x0, y0), x1 - x0, y1 - y0,
+                    facecolor=XT_GRID_CMAP(norm(value)),
+                    edgecolor=(1, 1, 1, 0.15),
+                    linewidth=0.4,
+                    alpha=0.95,
+                    zorder=2,
+                )
+            )
+            label = f"{value * 100:.1f}%" if as_percent else f"{value:{value_fmt}}"
+            ax.text(
+                (x0 + x1) / 2, (y0 + y1) / 2, label,
+                ha="center", va="center",
+                color="#000000" if value <= threshold else "#ffffff",
+                fontsize=5.2 * scale, fontweight="600", zorder=4,
+            )
+
+    pitch.draw(ax=ax)
+    ax.set_title(title, color="#eef1f7", fontsize=10 * scale, pad=8)
+    sm = plt.cm.ScalarMappable(cmap=XT_GRID_CMAP, norm=norm)
+    cbar = fig.colorbar(sm, ax=ax, fraction=0.022, pad=0.02, shrink=0.55)
+    cbar.ax.yaxis.set_tick_params(color="#ffffff", labelsize=6)
+    plt.setp(cbar.ax.axes.get_yticklabels(), color="#ffffff")
+    _attack_arrow(fig, has_cbar=True)
+    return _save_fig(fig), fig
+
+
 def zone_xt_means(grid: np.ndarray, n_x: int = XT_ZONE_COLS, n_y: int = XT_ZONE_ROWS) -> np.ndarray:
     """Mean xT per pitch zone from the fine threat grid."""
     ny, nx = grid.shape
@@ -1125,65 +1212,6 @@ def zone_xt_means(grid: np.ndarray, n_x: int = XT_ZONE_COLS, n_y: int = XT_ZONE_
             x_end = int((ix + 1) * nx / n_x)
             zones[iy, ix] = float(grid[y_start:y_end, x_start:x_end].mean())
     return zones
-
-
-def _zone_name(ix: int, iy: int, n_x: int, n_y: int) -> str:
-    thirds = ["Defesa", "Meio", "Ataque"] if n_x == 3 else ["Esquerda", "Direita"]
-    halves = ["Corredor inf.", "Corredor sup."] if n_y == 2 else ["Baixo", "Cima"]
-    x_label = thirds[min(ix, len(thirds) - 1)] if n_x == 3 else thirds[min(ix, len(thirds) - 1)]
-    y_label = halves[iy]
-    return f"{x_label}\n{y_label}"
-
-
-def draw_xt_zone_map(
-    grid: np.ndarray,
-    title: str,
-    vmax: float,
-    *,
-    n_x: int = XT_ZONE_COLS,
-    n_y: int = XT_ZONE_ROWS,
-):
-    """Pitch map with mean xT value labeled in each zone."""
-    zone_means = zone_xt_means(grid, n_x=n_x, n_y=n_y)
-    pitch = Pitch(pitch_type="statsbomb", pitch_color="#1a1a2e", line_color="#ffffff", line_alpha=0.95)
-    fig, ax = pitch.draw(figsize=(FIG_W, FIG_H))
-    fig.set_facecolor("#1a1a2e")
-    fig.set_dpi(FIG_DPI)
-    scale = _map_scale()
-    cmap = plt.cm.magma
-    norm = Normalize(vmin=0, vmax=vmax)
-
-    for iy in range(n_y):
-        for ix in range(n_x):
-            x0 = ix * FIELD_X / n_x
-            x1 = (ix + 1) * FIELD_X / n_x
-            y0 = iy * FIELD_Y / n_y
-            y1 = (iy + 1) * FIELD_Y / n_y
-            val = zone_means[iy, ix]
-            ax.add_patch(
-                Rectangle(
-                    (x0, y0), x1 - x0, y1 - y0,
-                    facecolor=cmap(norm(val)), edgecolor="#ffffff",
-                    linewidth=1.0, alpha=0.72, zorder=1,
-                )
-            )
-            ax.text(
-                (x0 + x1) / 2, (y0 + y1) / 2,
-                f"{val:.3f}",
-                ha="center", va="center", color="white",
-                fontsize=7.5 * scale, fontweight="bold", zorder=4,
-            )
-            ax.text(
-                (x0 + x1) / 2, y0 + (y1 - y0) * 0.18,
-                _zone_name(ix, iy, n_x, n_y),
-                ha="center", va="center", color="#d1d5db",
-                fontsize=5.2 * scale, zorder=4,
-            )
-
-    pitch.draw(ax=ax)
-    ax.set_title(title, color="white", fontsize=8.8 * scale, pad=5)
-    _attack_arrow(fig)
-    return _save_fig(fig), fig
 
 
 @st.cache_data(show_spinner=False)
@@ -1247,43 +1275,39 @@ def render_xt_model_comparison(
     """Compare xT v3 vs conservative v3c threat surfaces and top ΔxT maps."""
     match_label = _match_scope_label(match_selection)
 
-    st.markdown("### Superfície de ameaça xT")
+    st.markdown("### Mapa xT por quadrante (16×12)")
     st.caption(
-        "v3c conservador: escala 0–0.5, mesmas zonas do v3 com transições mais suaves "
-        f"(blend {XT_V3C_ZONE_BLEND_WIDTH:.0f}m vs {XT_V3_ZONE_BLEND_WIDTH:.0f}m no v3)."
+        "Cada célula mostra o xT médio da superfície naquele quadrante, "
+        "em percentual (valor × 100). Cores: azul (baixo) → vermelho (alto)."
     )
-    surf_cols = st.columns(2)
-    grid_v3 = compute_heuristic_v3_fine_grid()
-    grid_v3c = compute_heuristic_v3c_fine_grid()
-    with surf_cols[0]:
-        st.markdown('<div class="map-label">xT Heurístico v3 (0–1)</div>', unsafe_allow_html=True)
-        img_v3, fig_v3 = draw_xt_threat_surface(grid_v3, "Superfície v3", XT_V3_SURFACE_MAX)
-        plt.close(fig_v3)
-        st.image(img_v3, use_container_width=True)
+    grid_v3 = compute_heuristic_v3_xt_grid()
+    grid_v3c = compute_heuristic_v3c_xt_grid()
+    grid_cols = st.columns(2)
+    with grid_cols[0]:
+        st.markdown('<div class="map-label">Heurístico v3</div>', unsafe_allow_html=True)
+        img_gv3, fig_gv3 = draw_xt_grid_map(grid_v3, "Heurístico v3", as_percent=True)
+        plt.close(fig_gv3)
+        st.image(img_gv3, use_container_width=True)
         st.caption(f"Máx: {grid_v3.max():.3f} · Média: {grid_v3.mean():.3f}")
-    with surf_cols[1]:
-        st.markdown('<div class="map-label">xT Heurístico v3c conservador (0–0.5)</div>', unsafe_allow_html=True)
-        img_v3c, fig_v3c = draw_xt_threat_surface(grid_v3c, "Superfície v3c", XT_V3C_SURFACE_MAX)
-        plt.close(fig_v3c)
-        st.image(img_v3c, use_container_width=True)
+    with grid_cols[1]:
+        st.markdown('<div class="map-label">Heurístico v3c (conservador)</div>', unsafe_allow_html=True)
+        img_gv3c, fig_gv3c = draw_xt_grid_map(grid_v3c, "Heurístico v3c", as_percent=True)
+        plt.close(fig_gv3c)
+        st.image(img_gv3c, use_container_width=True)
         st.caption(f"Máx: {grid_v3c.max():.3f} · Média: {grid_v3c.mean():.3f}")
 
-    st.markdown("### xT médio por zona do campo")
-    st.caption(
-        f"Campo dividido em {XT_ZONE_COLS}×{XT_ZONE_ROWS} zonas "
-        "(terços horizontais × corredores verticais) com valor médio da superfície xT."
-    )
-    zone_cols = st.columns(2)
-    with zone_cols[0]:
-        st.markdown('<div class="map-label">Zonas · v3</div>', unsafe_allow_html=True)
-        img_zv3, fig_zv3 = draw_xt_zone_map(grid_v3, "xT por zona · v3", XT_V3_SURFACE_MAX)
-        plt.close(fig_zv3)
-        st.image(img_zv3, use_container_width=True)
-    with zone_cols[1]:
-        st.markdown('<div class="map-label">Zonas · v3c</div>', unsafe_allow_html=True)
-        img_zv3c, fig_zv3c = draw_xt_zone_map(grid_v3c, "xT por zona · v3c", XT_V3C_SURFACE_MAX)
-        plt.close(fig_zv3c)
-        st.image(img_zv3c, use_container_width=True)
+    with st.expander("Superfície contínua xT"):
+        surf_cols = st.columns(2)
+        fine_v3 = compute_heuristic_v3_fine_grid()
+        fine_v3c = compute_heuristic_v3c_fine_grid()
+        with surf_cols[0]:
+            img_v3, fig_v3 = draw_xt_threat_surface(fine_v3, "Superfície v3", XT_V3_SURFACE_MAX)
+            plt.close(fig_v3)
+            st.image(img_v3, use_container_width=True)
+        with surf_cols[1]:
+            img_v3c, fig_v3c = draw_xt_threat_surface(fine_v3c, "Superfície v3c", XT_V3C_SURFACE_MAX)
+            plt.close(fig_v3c)
+            st.image(img_v3c, use_container_width=True)
 
     st.markdown("---")
     st.markdown("### Top 10 ΔxT — v3 vs v3c")
