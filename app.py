@@ -137,7 +137,7 @@ ACTION_TYPE_LABELS = {
 
 # ── COORDINATE HELPERS ───────────────────────────────────────
 def wyscout_to_statsbomb(x: float, y: float) -> tuple[float, float]:
-    """Wyscout 0–100 → StatsBomb 120×80 (ataque da esquerda para a direita)."""
+    """Wyscout 0–100 → StatsBomb 120×80."""
     return x * FIELD_X / WYSCOUT_PITCH_SIZE, y * FIELD_Y / WYSCOUT_PITCH_SIZE
 
 
@@ -664,9 +664,7 @@ def _base_pitch(bg="#1a1a2e"):
     fig, ax = pitch.draw(figsize=(FIG_W, FIG_H))
     fig.set_facecolor(bg)
     fig.set_dpi(FIG_DPI)
-    ax.axvline(x=OPT_ATTACKING_TWO_THIRDS_X, color="#ffffff", lw=0.9, alpha=0.22, linestyle="--")
-    ax.axvline(x=FINAL_THIRD_LINE_X, color="#ffffff", lw=1.2, alpha=0.40, linestyle="--")
-    ax.axvline(x=HALF_LINE_X, color="#ffffff", lw=0.7, alpha=0.12, linestyle="--")
+    ax.invert_xaxis()
     return fig, ax, pitch
 
 
@@ -698,8 +696,8 @@ def _attack_arrow(fig, has_cbar: bool = False):
     ox = -0.04 if has_cbar else 0.0
     fig.patches.append(
         FancyArrowPatch(
-            (0.44 + ox, 0.045),
             (0.56 + ox, 0.045),
+            (0.44 + ox, 0.045),
             transform=fig.transFigure,
             arrowstyle="-|>",
             mutation_scale=10 * scale,
@@ -921,34 +919,32 @@ st.caption(
     f"xT Heurístico v3 em passes e conduções"
 )
 
-tab_maps, tab_stats, tab_data = st.tabs(["Mapas", "Estatísticas", "Dados"])
+if filtered.empty:
+    st.info("Nenhuma ação para os filtros selecionados.")
+else:
+    render_maps(filtered)
 
-with tab_maps:
-    if filtered.empty:
-        st.info("Nenhuma ação para os filtros selecionados.")
-    else:
-        render_maps(filtered)
+st.markdown("---")
+st.markdown("### Estatísticas")
+render_player_cards(stats, PLAYER_TONE)
 
-with tab_stats:
-    render_player_cards(stats, PLAYER_TONE)
+st.markdown("#### Por tipo de ação")
+type_rows = [
+    {
+        "Tipo": ACTION_TYPE_LABELS.get(k, k),
+        "Categoria": CATEGORY_LABELS.get(
+            filtered.loc[filtered["action_type"] == k, "category"].iloc[0]
+            if (filtered["action_type"] == k).any()
+            else "",
+            "",
+        ),
+        "Quantidade": v,
+    }
+    for k, v in sorted(stats["by_action_type"].items(), key=lambda item: -item[1])
+]
+st.dataframe(pd.DataFrame(type_rows), use_container_width=True, hide_index=True)
 
-    st.markdown("### Por tipo de ação")
-    type_rows = [
-        {
-            "Tipo": ACTION_TYPE_LABELS.get(k, k),
-            "Categoria": CATEGORY_LABELS.get(
-                filtered.loc[filtered["action_type"] == k, "category"].iloc[0]
-                if (filtered["action_type"] == k).any()
-                else "",
-                "",
-            ),
-            "Quantidade": v,
-        }
-        for k, v in sorted(stats["by_action_type"].items(), key=lambda item: -item[1])
-    ]
-    st.dataframe(pd.DataFrame(type_rows), use_container_width=True, hide_index=True)
-
-with tab_data:
+with st.expander("Dados detalhados"):
     display_cols = [
         "row_id",
         "category",
