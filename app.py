@@ -60,7 +60,7 @@ ARROW_HEADLENGTH = 1.15
 ARROW_ALPHA = 0.68
 ARROW_ALPHA_EMPH = 0.82
 ALL_MATCHES_LABEL = "All Matches"
-DATA_CACHE_VERSION = 2
+DATA_CACHE_VERSION = 3
 XT_ZONE_COLS = 3
 XT_ZONE_ROWS = 2
 NX_XT = 16
@@ -126,6 +126,15 @@ XT_V3C_MAX_DELTA_DEF = 0.14
 XT_V3C_MAX_DELTA_MID = 0.18
 XT_V3C_MAX_DELTA_ATT = 0.21
 XT_V3C_MAX_DELTA_BOX = 0.26
+
+# xT Heurístico v3s — incrementos por coluna (0→0.5), zonas centrais maiores
+XT_MODEL_HEURISTIC_V3S = "heuristic_v3s"
+XT_V3S_SURFACE_MAX = 0.50
+XT_V3S_STEP_EARLY = 0.04
+XT_V3S_STEP_LATE = 0.06
+XT_V3S_COL_BREAK = 10
+NX_V3S_COLS = 20
+NX_XT_V3S_DISPLAY = 20
 
 CARD_TITLE_TEXT = "14px"
 CARD_LABEL_TEXT = "16px"
@@ -502,6 +511,83 @@ def apply_heuristic_v3c_xt(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+# ── xT HEURÍSTICO v3s (incrementos por coluna) ───────────────
+def _build_v3s_column_baseline(n_cols: int = NX_V3S_COLS) -> np.ndarray:
+    """Per-column xT at pitch center: +4% até col. 10, +6% depois, máx 0.5."""
+    baseline = np.zeros(n_cols, dtype=float)
+    for i in range(1, n_cols):
+        dest_col = i + 1
+        step = XT_V3S_STEP_EARLY if dest_col <= XT_V3S_COL_BREAK else XT_V3S_STEP_LATE
+        baseline[i] = min(baseline[i - 1] + step, XT_V3S_SURFACE_MAX)
+    return baseline
+
+
+def _baseline_x_threat_v3s(x: np.ndarray, n_cols: int = NX_V3S_COLS) -> np.ndarray:
+    baseline = _build_v3s_column_baseline(n_cols)
+    x_centers = (np.arange(n_cols) + 0.5) * FIELD_X / n_cols
+    flat_x = np.clip(np.asarray(x, dtype=float).ravel(), 0.0, FIELD_X)
+    return np.interp(flat_x, x_centers, baseline).reshape(np.asarray(x).shape)
+
+
+def _build_heuristic_v3s_threat_surface(Xc: np.ndarray, Yc: np.ndarray) -> np.ndarray:
+    zonal = _baseline_x_threat_v3s(Xc, NX_V3S_COLS)
+    surface = zonal * _location_factor_v3c(Xc, Yc) * _v4_xg_finishing_factor_v3c(Xc, Yc)
+    surface = np.clip(surface, 0.0, XT_V3S_SURFACE_MAX)
+    return _enforce_row_monotonic_x(surface)
+
+
+@st.cache_data(show_spinner=False)
+def compute_heuristic_v3s_fine_grid(nx: int = XT_V3_FINE_NX, ny: int = XT_V3_FINE_NY) -> np.ndarray:
+    xe = np.linspace(0.0, FIELD_X, nx)
+    ye = np.linspace(0.0, FIELD_Y, ny)
+    Xc, Yc = np.meshgrid(xe, ye)
+    return _build_heuristic_v3s_threat_surface(Xc, Yc)
+
+
+@st.cache_data(show_spinner=False)
+def compute_heuristic_v3s_xt_grid(
+    n_x: int = NX_XT_V3S_DISPLAY, n_y: int = NY_XT,
+) -> np.ndarray:
+    fine = compute_heuristic_v3s_fine_grid()
+    grid = zone_xt_means(fine, n_x=n_x, n_y=n_y)
+    return _enforce_row_monotonic_x(grid)
+
+
+def _adjust_heuristic_v3s_pass_delta(row) -> float:
+    if not row.is_won:
+        return 0.0
+    raw = float(row.xt_end_v3s - row.xt_start_v3s)
+    if raw >= 0:
+        adjusted = raw * _v3_short_pass_multiplier(row.pass_distance)
+        return min(adjusted, _v3c_zone_max_pass_delta(row.x_start))
+    lat_start = _lateral_frac(row.y_start)
+    lat_end = _lateral_frac(row.y_end)
+    if row.x_start < XT_V3_NEG_RECYCLE_X_MAX:
+        adjusted = raw * (XT_V3_NEG_PENALTY_FACTOR if lat_end < lat_start else 1.0)
+    else:
+        adjusted = raw
+    if (
+        row.x_start < XT_V3_PRESSURE_X_MAX
+        and lat_start > XT_V3_WIDE_FRAC
+        and lat_end < lat_start - 0.12
+    ):
+        adjusted += XT_V3_PRESSURE_ESCAPE_BONUS * 0.5
+    return adjusted
+
+
+def apply_heuristic_v3s_xt(df: pd.DataFrame) -> pd.DataFrame:
+    fine = compute_heuristic_v3s_fine_grid()
+    out = df.copy()
+    out["xt_start_v3s"] = out.apply(
+        lambda r: xt_value_bilinear(r["x_start"], r["y_start"], fine), axis=1
+    )
+    out["xt_end_v3s"] = out.apply(
+        lambda r: xt_value_bilinear(r["x_end"], r["y_end"], fine), axis=1
+    )
+    out["delta_xt_v3s"] = out.apply(_adjust_heuristic_v3s_pass_delta, axis=1)
+    return out
+
+
 def classify_xt_progressive_v3_adjusted(
     xt_start: float,
     delta_xt: float,
@@ -581,7 +667,11 @@ def enrich_with_xt_v3(df: pd.DataFrame) -> pd.DataFrame:
     carry_mask = out["category"] == "ball-carries"
     out.loc[carry_mask, "is_won"] = out.loc[carry_mask, "has_end"]
 
-    for col in ("xt_start", "xt_end", "delta_xt", "xt_start_v3c", "xt_end_v3c", "delta_xt_v3c"):
+    for col in (
+        "xt_start", "xt_end", "delta_xt",
+        "xt_start_v3c", "xt_end_v3c", "delta_xt_v3c",
+        "xt_start_v3s", "xt_end_v3s", "delta_xt_v3s",
+    ):
         out[col] = 0.0
     out["progressive"] = False
     out["impact_pass"] = False
@@ -603,6 +693,11 @@ def enrich_with_xt_v3(df: pd.DataFrame) -> pd.DataFrame:
         ["xt_start_v3c", "xt_end_v3c", "delta_xt_v3c"]
     ].values
 
+    xt_df_v3s = apply_heuristic_v3s_xt(out.loc[xt_mask].copy())
+    out.loc[xt_mask, ["xt_start_v3s", "xt_end_v3s", "delta_xt_v3s"]] = xt_df_v3s[
+        ["xt_start_v3s", "xt_end_v3s", "delta_xt_v3s"]
+    ].values
+
     pass_mask = out["category"] == "passes"
     for idx, row in out.loc[pass_mask].iterrows():
         out.at[idx, "progressive"] = bool(
@@ -621,20 +716,31 @@ def enrich_with_xt_v3(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def ensure_xt_model_columns(df: pd.DataFrame) -> pd.DataFrame:
-    """Backfill v3c columns when serving cached frames from older app versions."""
-    if df.empty or "delta_xt_v3c" in df.columns:
+    """Backfill v3c/v3s columns when serving cached frames from older app versions."""
+    if df.empty:
         return df
 
     out = df.copy()
-    for col in ("xt_start_v3c", "xt_end_v3c", "delta_xt_v3c"):
-        out[col] = 0.0
-
     xt_mask = out["category"].isin(["passes", "ball-carries"]) & out["has_end"]
-    if xt_mask.any():
-        xt_df_v3c = apply_heuristic_v3c_xt(out.loc[xt_mask].copy())
-        out.loc[xt_mask, ["xt_start_v3c", "xt_end_v3c", "delta_xt_v3c"]] = xt_df_v3c[
-            ["xt_start_v3c", "xt_end_v3c", "delta_xt_v3c"]
-        ].values
+
+    if "delta_xt_v3c" not in out.columns:
+        for col in ("xt_start_v3c", "xt_end_v3c", "delta_xt_v3c"):
+            out[col] = 0.0
+        if xt_mask.any():
+            xt_df_v3c = apply_heuristic_v3c_xt(out.loc[xt_mask].copy())
+            out.loc[xt_mask, ["xt_start_v3c", "xt_end_v3c", "delta_xt_v3c"]] = xt_df_v3c[
+                ["xt_start_v3c", "xt_end_v3c", "delta_xt_v3c"]
+            ].values
+
+    if "delta_xt_v3s" not in out.columns:
+        for col in ("xt_start_v3s", "xt_end_v3s", "delta_xt_v3s"):
+            out[col] = 0.0
+        if xt_mask.any():
+            xt_df_v3s = apply_heuristic_v3s_xt(out.loc[xt_mask].copy())
+            out.loc[xt_mask, ["xt_start_v3s", "xt_end_v3s", "delta_xt_v3s"]] = xt_df_v3s[
+                ["xt_start_v3s", "xt_end_v3s", "delta_xt_v3s"]
+            ].values
+
     return out
 
 
@@ -1145,16 +1251,20 @@ def draw_xt_grid_map(
     as_percent: bool = True,
     color_percentile: tuple[float, float] | None = (5, 95),
     value_fmt: str = ".2f",
+    n_x: int | None = None,
+    n_y: int | None = None,
 ):
-    """16×12 pitch grid with xT value labeled in each cell (Hudson-style)."""
+    """Pitch grid with xT value labeled in each cell (Hudson-style)."""
+    cols = n_x if n_x is not None else grid.shape[1]
+    rows = n_y if n_y is not None else grid.shape[0]
     pitch = Pitch(pitch_type="statsbomb", pitch_color="#1a1a2e", line_color="#ffffff", line_alpha=0.95)
     fig, ax = pitch.draw(figsize=(7.8, 5.2))
     fig.set_facecolor("#1a1a2e")
     fig.set_dpi(FIG_DPI)
     scale = 7.8 / MAP_REF_WIDTH
 
-    x_bins = np.linspace(0, FIELD_X, NX_XT + 1)
-    y_bins = np.linspace(0, FIELD_Y, NY_XT + 1)
+    x_bins = np.linspace(0, FIELD_X, cols + 1)
+    y_bins = np.linspace(0, FIELD_Y, rows + 1)
     if color_percentile is not None:
         vmin = float(np.percentile(grid, color_percentile[0]))
         vmax = float(np.percentile(grid, color_percentile[1]))
@@ -1167,8 +1277,8 @@ def draw_xt_grid_map(
     norm = Normalize(vmin=vmin, vmax=vmax)
     threshold = vmin + (vmax - vmin) * 0.45
 
-    for iy in range(NY_XT):
-        for ix in range(NX_XT):
+    for iy in range(rows):
+        for ix in range(cols):
             value = float(grid[iy, ix])
             x0, x1 = x_bins[ix], x_bins[ix + 1]
             y0, y1 = y_bins[iy], y_bins[iy + 1]
@@ -1275,31 +1385,43 @@ def render_xt_model_comparison(
     """Compare xT v3 vs conservative v3c threat surfaces and top ΔxT maps."""
     match_label = _match_scope_label(match_selection)
 
-    st.markdown("### Mapa xT por quadrante (16×12)")
+    st.markdown("### Mapa xT por quadrante")
     st.caption(
-        "Cada célula mostra o xT médio da superfície naquele quadrante, "
-        "em percentual (valor × 100). Cores: azul (baixo) → vermelho (alto)."
+        "Cada célula mostra o xT médio em percentual. "
+        "**v3s**: +4% por coluna até a col. 10, +6% depois (máx 0.5), "
+        f"com {NX_V3S_COLS} colunas e zonas centrais mais valiosas."
     )
     grid_v3 = compute_heuristic_v3_xt_grid()
     grid_v3c = compute_heuristic_v3c_xt_grid()
-    grid_cols = st.columns(2)
+    grid_v3s = compute_heuristic_v3s_xt_grid()
+    grid_cols = st.columns(3)
     with grid_cols[0]:
         st.markdown('<div class="map-label">Heurístico v3</div>', unsafe_allow_html=True)
         img_gv3, fig_gv3 = draw_xt_grid_map(grid_v3, "Heurístico v3", as_percent=True)
         plt.close(fig_gv3)
         st.image(img_gv3, use_container_width=True)
-        st.caption(f"Máx: {grid_v3.max():.3f} · Média: {grid_v3.mean():.3f}")
+        st.caption(f"16×12 · Máx: {grid_v3.max():.3f} · Média: {grid_v3.mean():.3f}")
     with grid_cols[1]:
-        st.markdown('<div class="map-label">Heurístico v3c (conservador)</div>', unsafe_allow_html=True)
+        st.markdown('<div class="map-label">Heurístico v3c</div>', unsafe_allow_html=True)
         img_gv3c, fig_gv3c = draw_xt_grid_map(grid_v3c, "Heurístico v3c", as_percent=True)
         plt.close(fig_gv3c)
         st.image(img_gv3c, use_container_width=True)
-        st.caption(f"Máx: {grid_v3c.max():.3f} · Média: {grid_v3c.mean():.3f}")
+        st.caption(f"16×12 · Máx: {grid_v3c.max():.3f} · Média: {grid_v3c.mean():.3f}")
+    with grid_cols[2]:
+        st.markdown('<div class="map-label">Heurístico v3s (por coluna)</div>', unsafe_allow_html=True)
+        img_gv3s, fig_gv3s = draw_xt_grid_map(
+            grid_v3s, "Heurístico v3s", as_percent=True,
+            n_x=NX_XT_V3S_DISPLAY, n_y=NY_XT,
+        )
+        plt.close(fig_gv3s)
+        st.image(img_gv3s, use_container_width=True)
+        st.caption(f"{NX_XT_V3S_DISPLAY}×{NY_XT} · Máx: {grid_v3s.max():.3f} · Média: {grid_v3s.mean():.3f}")
 
     with st.expander("Superfície contínua xT"):
-        surf_cols = st.columns(2)
+        surf_cols = st.columns(3)
         fine_v3 = compute_heuristic_v3_fine_grid()
         fine_v3c = compute_heuristic_v3c_fine_grid()
+        fine_v3s = compute_heuristic_v3s_fine_grid()
         with surf_cols[0]:
             img_v3, fig_v3 = draw_xt_threat_surface(fine_v3, "Superfície v3", XT_V3_SURFACE_MAX)
             plt.close(fig_v3)
@@ -1308,9 +1430,13 @@ def render_xt_model_comparison(
             img_v3c, fig_v3c = draw_xt_threat_surface(fine_v3c, "Superfície v3c", XT_V3C_SURFACE_MAX)
             plt.close(fig_v3c)
             st.image(img_v3c, use_container_width=True)
+        with surf_cols[2]:
+            img_v3s, fig_v3s = draw_xt_threat_surface(fine_v3s, "Superfície v3s", XT_V3S_SURFACE_MAX)
+            plt.close(fig_v3s)
+            st.image(img_v3s, use_container_width=True)
 
     st.markdown("---")
-    st.markdown("### Top 10 ΔxT — v3 vs v3c")
+    st.markdown("### Top 10 ΔxT — v3 / v3c / v3s")
 
     summary_rows = []
     for player in PLAYERS:
@@ -1327,11 +1453,13 @@ def render_xt_model_comparison(
             "Jogador": player["name"],
             "Σ ΔxT v3": round(_safe_col_sum(xt_actions, "delta_xt"), 3),
             "Σ ΔxT v3c": round(_safe_col_sum(xt_actions, "delta_xt_v3c"), 3),
+            "Σ ΔxT v3s": round(_safe_col_sum(xt_actions, "delta_xt_v3s"), 3),
             "Σ xT final v3": round(_safe_col_sum(passes, "xt_end"), 3),
             "Σ xT final v3c": round(_safe_col_sum(passes, "xt_end_v3c"), 3),
+            "Σ xT final v3s": round(_safe_col_sum(passes, "xt_end_v3s"), 3),
         })
 
-        cmp_cols = st.columns(2)
+        cmp_cols = st.columns(3)
         with cmp_cols[0]:
             st.markdown('<div class="map-label">Top ΔxT · v3</div>', unsafe_allow_html=True)
             _show_map(
@@ -1347,6 +1475,14 @@ def render_xt_model_comparison(
                     d, n, m, delta_col="delta_xt_v3c", model_label="v3c"
                 ),
                 df, player["name"], match_label, "Sem ações com ΔxT positivo (v3c).",
+            )
+        with cmp_cols[2]:
+            st.markdown('<div class="map-label">Top ΔxT · v3s</div>', unsafe_allow_html=True)
+            _show_map(
+                lambda d, n, m: draw_top_deltaxt_map(
+                    d, n, m, delta_col="delta_xt_v3s", model_label="v3s"
+                ),
+                df, player["name"], match_label, "Sem ações com ΔxT positivo (v3s).",
             )
 
     if summary_rows:
@@ -1392,9 +1528,9 @@ with st.sidebar:
     st.markdown("---")
     match_options = [ALL_MATCHES_LABEL, *get_available_matches(player_data)]
     selected_match = st.selectbox("Selecionar partida", match_options, label_visibility="collapsed")
-    st.caption("xT v3 · v3c conservador · Progressivos Wyscout")
+    st.caption("xT v3 · v3c · v3s (incrementos por coluna) · Progressivos Wyscout")
 
-tab_analysis, tab_compare = st.tabs(["Análise", "Comparar xT v3 vs v3c"])
+tab_analysis, tab_compare = st.tabs(["Análise", "Comparar xT v3 / v3c / v3s"])
 
 with tab_analysis:
     render_comparison(player_data, selected_match)
