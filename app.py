@@ -60,7 +60,7 @@ ARROW_HEADLENGTH = 1.15
 ARROW_ALPHA = 0.68
 ARROW_ALPHA_EMPH = 0.82
 ALL_MATCHES_LABEL = "All Matches"
-DATA_CACHE_VERSION = 12
+DATA_CACHE_VERSION = 13
 XT_ZONE_COLS = 3
 XT_ZONE_ROWS = 2
 NX_XT = 16
@@ -115,10 +115,10 @@ XT_V5_MAX_DELTA_BOX = 0.52
 # xT Heurístico v3.1 — transições suaves e salto reduzido na linha de meio
 XT_MODEL_HEURISTIC_V31 = "heuristic_v31"
 XT_V31_ZONE_BLEND_WIDTH = 48.0
-XT_V31_LAT_DISC_MAX = 0.05
+XT_V31_LAT_DISC_MAX = 0.03
 XT_V31_LAT_GATE_X = HALF_LINE_X
 XT_V31_GAUSS_SIGMA_X = 3.5
-XT_V31_GAUSS_SIGMA_Y = 2.0
+XT_V31_GAUSS_SIGMA_Y = 0.0
 XT_V31_COL_SMOOTH_KERNEL = (0.22, 0.56, 0.22)
 XT_V31_MAX_COL_STEP_DEF = 0.050
 XT_V31_MAX_COL_STEP_ATT = 0.078
@@ -386,10 +386,14 @@ def _gaussian_kernel_1d(sigma: float) -> np.ndarray:
 
 
 def _gaussian_smooth_2d(grid: np.ndarray, sigma_x: float, sigma_y: float) -> np.ndarray:
-    kx = _gaussian_kernel_1d(sigma_x)
-    ky = _gaussian_kernel_1d(sigma_y)
-    tmp = np.apply_along_axis(lambda row: np.convolve(row, kx, mode="same"), axis=1, arr=grid)
-    return np.apply_along_axis(lambda row: np.convolve(row, ky, mode="same"), axis=0, arr=tmp)
+    out = grid
+    if sigma_x > 0:
+        kx = _gaussian_kernel_1d(sigma_x)
+        out = np.apply_along_axis(lambda row: np.convolve(row, kx, mode="same"), axis=1, arr=out)
+    if sigma_y > 0:
+        ky = _gaussian_kernel_1d(sigma_y)
+        out = np.apply_along_axis(lambda row: np.convolve(row, ky, mode="same"), axis=0, arr=out)
+    return out
 
 
 def _map_zonal_threat_v31(x: np.ndarray) -> np.ndarray:
@@ -425,7 +429,7 @@ def _location_factor_v31(x: np.ndarray, y: np.ndarray) -> np.ndarray:
 
 def _build_heuristic_v31_threat_surface(Xc: np.ndarray, Yc: np.ndarray) -> np.ndarray:
     zonal = _map_zonal_threat_v31(Xc)
-    surface = zonal * _location_factor_v31(Xc, Yc) * _v4_xg_finishing_factor(Xc, Yc)
+    surface = zonal * _location_factor_v31(Xc, Yc)
     surface = np.clip(surface, 0.0, XT_V3_SURFACE_MAX)
     smoothed = _gaussian_smooth_2d(surface, XT_V31_GAUSS_SIGMA_X, XT_V31_GAUSS_SIGMA_Y)
     return np.clip(smoothed, 0.0, XT_V3_SURFACE_MAX)
@@ -1367,8 +1371,8 @@ def render_xt_model_comparison(
             "delta_col": "delta_xt_v31",
             "xt_end_col": "xt_end_v31",
             "desc": (
-                "Blend amplo (48 m) + gaussiana (σx=3.5) + rampa 5.0/7.8 pp por coluna. "
-                "Penalização lateral suave (5%) apenas no campo ofensivo."
+                "Blend amplo (48 m) + gaussiana só em X (σx=3.5) + rampa 5.0/7.8 pp por coluna. "
+                "Penalização lateral suave (3%) apenas no campo ofensivo (x≥60)."
             ),
         },
     ]
