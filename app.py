@@ -60,7 +60,7 @@ ARROW_HEADLENGTH = 1.15
 ARROW_ALPHA = 0.68
 ARROW_ALPHA_EMPH = 0.82
 ALL_MATCHES_LABEL = "All Matches"
-DATA_CACHE_VERSION = 14
+DATA_CACHE_VERSION = 15
 XT_ZONE_COLS = 3
 XT_ZONE_ROWS = 2
 NX_XT = 16
@@ -590,28 +590,38 @@ def _row_if_won(row):
     return row
 
 
-def hypothetical_delta_xt(row) -> float:
-    return _adjust_heuristic_v3_pass_delta(_row_if_won(row))
+def _xt_column_set(variant: str = "v3") -> dict[str, str]:
+    if variant == "v31":
+        return {"start": "xt_start_v31", "end": "xt_end_v31", "delta": "delta_xt_v31"}
+    return {"start": "xt_start", "end": "xt_end", "delta": "delta_xt"}
 
 
-def progressive_delta_for_attempt(row) -> float:
+def hypothetical_delta_xt(row, cols: dict[str, str] | None = None) -> float:
+    cols = cols or _xt_column_set("v3")
+    return _adjust_heuristic_v3_variant_pass_delta(_row_if_won(row), cols["start"], cols["end"])
+
+
+def progressive_delta_for_attempt(row, cols: dict[str, str] | None = None) -> float:
+    cols = cols or _xt_column_set("v3")
     if row.is_won:
-        return float(row.delta_xt)
-    return hypothetical_delta_xt(row)
+        return float(getattr(row, cols["delta"]))
+    return hypothetical_delta_xt(row, cols)
 
 
-def is_impact_attempt(row) -> bool:
-    delta = progressive_delta_for_attempt(row)
+def is_impact_attempt(row, cols: dict[str, str] | None = None) -> bool:
+    cols = cols or _xt_column_set("v3")
+    delta = progressive_delta_for_attempt(row, cols)
     return classify_xt_progressive_v3_adjusted(
-        row.xt_start, delta, row.x_end, row.pass_distance
+        getattr(row, cols["start"]), delta, row.x_end, row.pass_distance
     ) in ("progressive", "highly")
 
 
-def is_high_impact_attempt(row) -> bool:
-    delta = progressive_delta_for_attempt(row)
+def is_high_impact_attempt(row, cols: dict[str, str] | None = None) -> bool:
+    cols = cols or _xt_column_set("v3")
+    delta = progressive_delta_for_attempt(row, cols)
     return (
         classify_xt_progressive_v3_adjusted(
-            row.xt_start, delta, row.x_end, row.pass_distance
+            getattr(row, cols["start"]), delta, row.x_end, row.pass_distance
         )
         == "highly"
     )
@@ -620,6 +630,22 @@ def is_high_impact_attempt(row) -> bool:
 def classification_accuracy(df: pd.DataFrame, success_col: str, attempt_fn) -> dict:
     attempts = df.apply(attempt_fn, axis=1)
     successful = int(df[success_col].astype(bool).sum())
+    attempted = int(attempts.sum())
+    accuracy_pct = (successful / attempted * 100.0) if attempted else 0.0
+    return {
+        "successful": successful,
+        "attempted": attempted,
+        "accuracy_pct": round(accuracy_pct, 1),
+    }
+
+
+def classification_accuracy_fn(
+    df: pd.DataFrame, attempt_fn, success_fn,
+) -> dict:
+    if df.empty:
+        return {"successful": 0, "attempted": 0, "accuracy_pct": 0.0}
+    attempts = df.apply(attempt_fn, axis=1)
+    successful = int(df.apply(success_fn, axis=1).sum())
     attempted = int(attempts.sum())
     accuracy_pct = (successful / attempted * 100.0) if attempted else 0.0
     return {
@@ -816,10 +842,12 @@ def _match_scope_label(match_selection: str) -> str:
 
 
 # ── STATS ────────────────────────────────────────────────────
-def compute_player_stats(df: pd.DataFrame) -> dict:
+def compute_player_stats(df: pd.DataFrame, *, xt_variant: str = "v3") -> dict:
     passes = df[df["category"] == "passes"]
     carries = df[df["category"] == "ball-carries"]
     empty_cls = {"successful": 0, "attempted": 0, "accuracy_pct": 0.0}
+    cols = _xt_column_set(xt_variant)
+    delta_col, end_col = cols["delta"], cols["end"]
 
     total_passes = len(passes)
     if total_passes == 0:
@@ -839,6 +867,7 @@ def compute_player_stats(df: pd.DataFrame) -> dict:
             "defensive_total": int((df["category"] == "defensive").sum()),
             "total_actions": len(df),
             "by_action_type": df.groupby("action_type").size().to_dict(),
+            "xt_variant": xt_variant,
         }
 
     successful = int(passes["is_success"].sum())
@@ -848,13 +877,36 @@ def compute_player_stats(df: pd.DataFrame) -> dict:
         "progressive",
         lambda r: is_progressive_wyscout(r["x_start"], r["y_start"], r["x_end"], r["y_end"]),
     )
-    impact_pass = classification_accuracy(passes, "impact_pass", is_impact_attempt)
-    high_impact_pass = classification_accuracy(passes, "high_impact_pass", is_high_impact_attempt)
-    impact_carry = classification_accuracy(carries, "impact_carry", is_impact_attempt)
-    high_impact_carry = classification_accuracy(carries, "high_impact_carry", is_high_impact_attempt)
+
+    if xt_variant == "v3":
+        impact_pass = classification_accuracy(passes, "impact_pass", is_impact_attempt)
+        high_impact_pass = classification_accuracy(passes, "high_impact_pass", is_high_impact_attempt)
+        impact_carry = classification_accuracy(carries, "impact_carry", is_impact_attempt)
+        high_impact_carry = classification_accuracy(carries, "high_impact_carry", is_high_impact_attempt)
+    else:
+        impact_pass = classification_accuracy_fn(
+            passes,
+            lambda r: is_impact_attempt(r, cols),
+            lambda r: bool(r.is_won and is_impact_attempt(r, cols)),
+        )
+        high_impact_pass = classification_accuracy_fn(
+            passes,
+            lambda r: is_high_impact_attempt(r, cols),
+            lambda r: bool(r.is_won and is_high_impact_attempt(r, cols)),
+        )
+        impact_carry = classification_accuracy_fn(
+            carries,
+            lambda r: is_impact_attempt(r, cols),
+            lambda r: bool(r.is_won and is_impact_attempt(r, cols)),
+        )
+        high_impact_carry = classification_accuracy_fn(
+            carries,
+            lambda r: is_high_impact_attempt(r, cols),
+            lambda r: bool(r.is_won and is_high_impact_attempt(r, cols)),
+        )
 
     xt_actions = df[df["category"].isin(["passes", "ball-carries"]) & df["has_end"]]
-    pos_count = int((xt_actions["delta_xt"] > 0).sum())
+    pos_count = int((xt_actions[delta_col] > 0).sum())
     pos_pct = (pos_count / len(xt_actions) * 100.0) if len(xt_actions) else 0.0
 
     completed_passes = passes[passes["is_success"]]
@@ -867,14 +919,15 @@ def compute_player_stats(df: pd.DataFrame) -> dict:
         "high_impact_pass": high_impact_pass,
         "impact_carry": impact_carry,
         "high_impact_carry": high_impact_carry,
-        "sum_dxt_passes": float(passes["delta_xt"].sum()),
-        "sum_dxt_carries": float(carries["delta_xt"].sum()),
-        "sum_xt_end_passes": float(completed_passes["xt_end"].sum()) if not completed_passes.empty else 0.0,
+        "sum_dxt_passes": float(passes[delta_col].sum()),
+        "sum_dxt_carries": float(carries[delta_col].sum()),
+        "sum_xt_end_passes": float(completed_passes[end_col].sum()) if not completed_passes.empty else 0.0,
         "pos_pct": pos_pct,
         "carries_total": len(carries),
         "defensive_total": int((df["category"] == "defensive").sum()),
         "total_actions": len(df),
         "by_action_type": df.groupby("action_type").size().to_dict(),
+        "xt_variant": xt_variant,
     }
 
 
@@ -926,19 +979,23 @@ def stats_section_card(title: str, border_color: str, items: list[tuple[str, str
     st.markdown(_stats_card_shell_html(title, border_color, inner), unsafe_allow_html=True)
 
 
-def render_impact_card(stats: dict, tone: str) -> None:
+def render_impact_card(stats: dict, tone: str, *, model_label: str = "v3") -> None:
     impact = stats["impact_pass"]
     high_impact = stats["high_impact_pass"]
     carry_impact = stats["impact_carry"]
     carry_high = stats["high_impact_carry"]
+    title = f"Impact (xT {model_label})" if model_label != "v3" else "Impact"
     stats_section_card(
-        "Impact",
+        title,
         tone,
         [
-            ("Pass Impact (xT v3)", f"{stats['sum_dxt_passes']:.2f}"),
+            (f"Pass Impact (xT {model_label})", f"{stats['sum_dxt_passes']:.2f}"),
             ("Σ xT final passes", f"{stats['sum_xt_end_passes']:.2f}"),
-            ("Carry Impact (xT v3)", f"{stats['sum_dxt_carries']:.2f}"),
-            ("Total Impact (xT v3)", f"{stats['sum_dxt_passes'] + stats['sum_dxt_carries']:.2f}"),
+            (f"Carry Impact (xT {model_label})", f"{stats['sum_dxt_carries']:.2f}"),
+            (
+                f"Total Impact (xT {model_label})",
+                f"{stats['sum_dxt_passes'] + stats['sum_dxt_carries']:.2f}",
+            ),
             ("Impact Passes", f"{impact['successful']:.0f}"),
             ("High Impact Passes", f"{high_impact['successful']:.0f}"),
             ("Impact Carries", f"{carry_impact['successful']:.0f}"),
@@ -1342,7 +1399,20 @@ def render_comparison(player_data: dict[str, pd.DataFrame], match_selection: str
         with col:
             df = filter_by_match(player_data[player["code"]], match_selection)
             if not df.empty:
-                render_impact_card(compute_player_stats(df), player["tone"])
+                render_impact_card(compute_player_stats(df, xt_variant="v3"), player["tone"])
+
+    st.markdown("---")
+    st.markdown("### Impact (xT v3.1)")
+    stat_cols_v31 = st.columns(3)
+    for col, player in zip(stat_cols_v31, PLAYERS):
+        with col:
+            df = filter_by_match(player_data[player["code"]], match_selection)
+            if not df.empty:
+                render_impact_card(
+                    compute_player_stats(df, xt_variant="v31"),
+                    player["tone"],
+                    model_label="v3.1",
+                )
 
 
 def render_xt_model_comparison(
