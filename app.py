@@ -63,7 +63,7 @@ ARROW_HEADLENGTH = 1.15
 ARROW_ALPHA = 0.68
 ARROW_ALPHA_EMPH = 0.82
 ALL_MATCHES_LABEL = "All Matches"
-DATA_CACHE_VERSION = 23
+DATA_CACHE_VERSION = 24
 XT_ZONE_COLS = 3
 XT_ZONE_ROWS = 2
 NX_XT = 16
@@ -126,17 +126,18 @@ XT_V31_MAX_COL_STEP_DEF = 0.050
 XT_V31_MAX_COL_STEP_ATT = 0.078
 XT_V31_ATT_COL_START = 10
 
-# xT Heurístico v3.2 — mescla v3.1 + Markov (magnitude baixa, bônus no terço final)
+# xT Heurístico v3.2 — quadrantes v3.1 (escala baixa) + bônus suave Markov por zona
 XT_MODEL_HEURISTIC_V32 = "heuristic_v32"
-XT_V32_MAGNITUDE_FACTOR = 0.90
-XT_V32_FINAL_THIRD_RAMP_X = FINAL_THIRD_LINE_X
-XT_V32_FINAL_THIRD_MARKOV_BLEND = 0.58
-XT_V32_SURFACE_MAX = 0.36
-XT_V32_GAUSS_SIGMA_X = 3.0
+XT_V32_BASE_MAX = 0.11
+XT_V32_QUADRANT_BONUS_MAX = 0.10
+XT_V32_BONUS_SIGMA_X = 4.0
+XT_V32_BONUS_SIGMA_Y = 2.0
+XT_V32_SURFACE_MAX = 0.24
+XT_V32_GAUSS_SIGMA_X = 0.0
 XT_V32_GAUSS_SIGMA_Y = 0.0
 XT_V32_COL_SMOOTH_KERNEL = (0.22, 0.56, 0.22)
-XT_V32_MAX_COL_STEP_DEF = 0.014
-XT_V32_MAX_COL_STEP_ATT = 0.022
+XT_V32_MAX_COL_STEP_DEF = 0.012
+XT_V32_MAX_COL_STEP_ATT = 0.018
 XT_V32_ATT_COL_START = 10
 
 CARD_TITLE_TEXT = "14px"
@@ -562,26 +563,25 @@ def compute_markov_fine_grid(
     return interp(pts).reshape(ny, nx)
 
 
-def _build_heuristic_v32_threat_surface(Xc: np.ndarray, Yc: np.ndarray) -> np.ndarray:
-    """v3.1 growth profile at Markov magnitude + Markov bonus in the final third."""
-    v31 = _build_heuristic_v31_threat_surface(Xc, Yc)
-    markov = compute_markov_fine_grid(Xc.shape[1], Xc.shape[0])
-
-    v31_peak = max(float(v31.max()), 1e-9)
-    markov_peak = max(float(markov.max()), 1e-9)
-    v31_shape = v31 / v31_peak
-    base = v31_shape * markov_peak * XT_V32_MAGNITUDE_FACTOR
-
-    ramp = np.clip(
-        (Xc - XT_V32_FINAL_THIRD_RAMP_X) / max(FIELD_X - XT_V32_FINAL_THIRD_RAMP_X, 1.0),
-        0.0,
-        1.0,
+def _markov_bonus_field(nx: int, ny: int) -> np.ndarray:
+    """Smooth per-zone bonus from Markov quadrant values (0 → max bonus)."""
+    markov = compute_markov_fine_grid(nx, ny)
+    peak = max(float(markov.max()), 1e-9)
+    rel = markov / peak
+    return _gaussian_smooth_2d(
+        rel * XT_V32_QUADRANT_BONUS_MAX,
+        XT_V32_BONUS_SIGMA_X,
+        XT_V32_BONUS_SIGMA_Y,
     )
-    blend = _smootherstep(ramp) * XT_V32_FINAL_THIRD_MARKOV_BLEND
-    surface = base * (1.0 - blend) + markov * blend
-    surface = np.clip(surface, 0.0, XT_V32_SURFACE_MAX)
-    smoothed = _gaussian_smooth_2d(surface, XT_V32_GAUSS_SIGMA_X, XT_V32_GAUSS_SIGMA_Y)
-    return np.clip(smoothed, 0.0, XT_V32_SURFACE_MAX)
+
+
+def _build_heuristic_v32_threat_surface(Xc: np.ndarray, Yc: np.ndarray) -> np.ndarray:
+    """v3.1 zone profile (low scale) + smoothed Markov quadrant bonus."""
+    v31 = _build_heuristic_v31_threat_surface(Xc, Yc)
+    peak = max(float(v31.max()), 1e-9)
+    base = (v31 / peak) * XT_V32_BASE_MAX
+    bonus = _markov_bonus_field(Xc.shape[1], Xc.shape[0])
+    return np.clip(base + bonus, 0.0, XT_V32_SURFACE_MAX)
 
 
 @st.cache_data(show_spinner=False)
@@ -1931,8 +1931,7 @@ def _render_external_model_comparison(
             "delta_col": "delta_xt_v32",
             "grid_fn": compute_heuristic_v32_xt_grid,
             "desc": (
-                "Mescla v3.1 + Markov: magnitude baixa como Markov, crescimento suave como v3.1, "
-                f"bônus Markov no terço final (x≥{int(FINAL_THIRD_LINE_X)} m)."
+                "Quadrantes v3.1 (escala baixa) + bônus suave por zona conforme Markov (WSL 2018/19)."
             ),
         },
     ]
@@ -1950,8 +1949,8 @@ def _render_external_model_comparison(
     st.markdown("---")
     st.markdown("### v3.1 · v3.2 · xT Markov")
     st.caption(
-        "O **v3.2** combina o perfil de crescimento do v3.1 com a escala do Markov. "
-        "No terço final, as zonas recebem bônus alinhados ao grid Markov (WSL 2018/19)."
+        "O **v3.2** mantém a lógica de quadrantes do v3.1 (transições suaves) em escala baixa, "
+        "somando um bônus suave por zona derivado do grid Markov (WSL 2018/19)."
     )
 
     if not markov_ok:
