@@ -14,7 +14,13 @@ from matplotlib.colors import LinearSegmentedColormap, Normalize
 from mplsoccer import Pitch
 from PIL import Image
 
-from external_models import apply_external_models, load_xt_markov_model, markov_grid_for_display
+from external_models import (
+    apply_external_models,
+    load_xt_markov_model,
+    markov_grid_for_display,
+    vaep_available,
+    vaep_status_message,
+)
 
 # ── PAGE CONFIG ────────────────────────────────────────────────
 st.set_page_config(layout="wide", page_title="WC Player Analysis — Top ΔxT")
@@ -1840,23 +1846,36 @@ def _render_external_model_comparison(
             "key": "Markov",
             "label": "xT Markov",
             "delta_col": "delta_xt_markov",
-            "desc": "Grid 16×12 treinado em FA WSL 2018/19 (StatsBomb Open Data, socceraction).",
-        },
-        {
-            "key": "VAEP",
-            "label": "VAEP",
-            "delta_col": "vaep_value",
-            "desc": "Valor de ação por ML (XGBoost) — mesma base WSL 2018/19. Sequência sintética por jogador/partida.",
+            "desc": "Grid 16×12 treinado em FA WSL 2018/19 (StatsBomb Open Data).",
         },
     ]
+    if vaep_available():
+        external_models.append(
+            {
+                "key": "VAEP",
+                "label": "VAEP",
+                "delta_col": "vaep_value",
+                "desc": "Valor de ação por ML (XGBoost) — mesma base WSL 2018/19. Sequência sintética por jogador/partida.",
+            }
+        )
 
     st.markdown("---")
-    st.markdown("### v3.1 · xT Markov · VAEP")
+    section_title = "### v3.1 · xT Markov" + (" · VAEP" if vaep_available() else "")
+    st.markdown(section_title)
     st.caption(
-        "Comparação exploratória: Markov e VAEP foram treinados na **FA WSL 2018/19** "
-        "(StatsBomb Open Data) e aplicados aos CSVs Wyscout do Brasil. "
-        "VAEP usa sequência sintética por jogador/partida (sem timestamps reais)."
+        "Comparação exploratória: Markov"
+        + (" e VAEP" if vaep_available() else "")
+        + " foram treinados na **FA WSL 2018/19** (StatsBomb Open Data) "
+        "e aplicados aos CSVs Wyscout do Brasil."
+        + (
+            " VAEP usa sequência sintética por jogador/partida (sem timestamps reais)."
+            if vaep_available()
+            else ""
+        )
     )
+    vaep_msg = vaep_status_message()
+    if vaep_msg:
+        st.info(f"VAEP não carregado neste ambiente: {vaep_msg}")
 
     try:
         markov_grid = markov_grid_for_display(load_xt_markov_model())
@@ -1877,7 +1896,7 @@ def _render_external_model_comparison(
             st.image(img, use_container_width=True)
             st.caption(
                 f"16×12 · Máx: {markov_grid.max():.3f} · Média: {markov_grid.mean():.3f} · "
-                "socceraction · interpolação desligada (compat. SciPy ≥1.14)"
+                "grid JSON pré-treinado (WSL 2018/19)"
             )
     except FileNotFoundError as exc:
         st.warning(str(exc))
@@ -1902,16 +1921,20 @@ def _render_external_model_comparison(
         summary_rows.append(row)
 
         corr_row = {"Jogador": player["name"]}
-        for col_a, col_b, label in (
-            ("delta_xt_v31", "delta_xt_markov", "v3.1 × Markov"),
-            ("delta_xt_v31", "vaep_value", "v3.1 × VAEP"),
-            ("delta_xt_markov", "vaep_value", "Markov × VAEP"),
-        ):
+        corr_pairs = [("delta_xt_v31", "delta_xt_markov", "v3.1 × Markov")]
+        if vaep_available():
+            corr_pairs.extend(
+                [
+                    ("delta_xt_v31", "vaep_value", "v3.1 × VAEP"),
+                    ("delta_xt_markov", "vaep_value", "Markov × VAEP"),
+                ]
+            )
+        for col_a, col_b, label in corr_pairs:
             corr = _model_correlation(xt_actions, col_a, col_b)
             corr_row[label] = round(corr, 3) if corr is not None else None
         corr_rows.append(corr_row)
 
-        cmp_cols = st.columns(3)
+        cmp_cols = st.columns(len(external_models))
         for col, model in zip(cmp_cols, external_models):
             with col:
                 st.markdown(

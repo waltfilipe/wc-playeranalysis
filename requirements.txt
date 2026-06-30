@@ -1,13 +1,9 @@
 streamlit
 matplotlib
 mplsoccer
-pandas
-numpy
+pandas>=2.1,<3
+numpy>=1.26,<2
 Pillow
-socceraction
-statsbombpy
 scipy
-xgboost
 scikit-learn
-pandera
-multimethod
+xgboost

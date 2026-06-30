@@ -1,0 +1,6 @@
+# Optional — only needed to train models (scripts/train_external_models.py)
+# and to enable VAEP at runtime (Python 3.11 or 3.12 recommended).
+socceraction==1.5.3
+statsbombpy
+pandera==0.17.2
+multimethod==1.9
