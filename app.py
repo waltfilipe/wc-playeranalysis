@@ -63,7 +63,7 @@ ARROW_HEADLENGTH = 1.15
 ARROW_ALPHA = 0.68
 ARROW_ALPHA_EMPH = 0.82
 ALL_MATCHES_LABEL = "All Matches"
-DATA_CACHE_VERSION = 24
+DATA_CACHE_VERSION = 26
 XT_ZONE_COLS = 3
 XT_ZONE_ROWS = 2
 NX_XT = 16
@@ -139,6 +139,17 @@ XT_V32_COL_SMOOTH_KERNEL = (0.22, 0.56, 0.22)
 XT_V32_MAX_COL_STEP_DEF = 0.012
 XT_V32_MAX_COL_STEP_ATT = 0.018
 XT_V32_ATT_COL_START = 10
+
+# Modelo ativo para stats, impact plays e mapas de análise
+XT_PRIMARY_VARIANT = "v32"
+XT_V32_SCALE = XT_V32_SURFACE_MAX / XT_V3_SURFACE_MAX
+# Limiares de impacto: escala pelo pico da grade v3.2 vs v3.1 (~0.157/0.889)
+XT_V32_CLASS_SCALE = 0.172
+XT_V32_PROG_FLOOR_CLASS = XT_V3_PROG_FLOOR_CLASS * XT_V32_CLASS_SCALE
+XT_V32_HIGH_FLOOR_CLASS = XT_V3_HIGH_FLOOR_CLASS * XT_V32_CLASS_SCALE
+XT_V32_PROG_SCALE_CLASS = XT_V3_PROG_SCALE_CLASS * XT_V32_CLASS_SCALE
+XT_V32_HIGH_SCALE_CLASS = XT_V3_HIGH_SCALE_CLASS * XT_V32_CLASS_SCALE
+XT_V32_PRESSURE_ESCAPE_BONUS = XT_V3_PRESSURE_ESCAPE_BONUS * XT_V32_SCALE
 
 CARD_TITLE_TEXT = "14px"
 CARD_LABEL_TEXT = "16px"
@@ -613,13 +624,28 @@ def compute_heuristic_v32_xt_grid(n_x: int = NX_XT, n_y: int = NY_XT) -> np.ndar
     return _sample_display_grid(fine, n_x, n_y, post_process=_post)
 
 
+def _variant_key_from_cols(cols: dict[str, str]) -> str:
+    delta = cols.get("delta", "")
+    if delta.endswith("_v32"):
+        return "v32"
+    if delta.endswith("_v31"):
+        return "v31"
+    return "v3"
+
+
+def _primary_xt_cols() -> dict[str, str]:
+    return _xt_column_set(XT_PRIMARY_VARIANT)
+
+
 def _adjust_heuristic_v3_variant_pass_delta(row, start_col: str, end_col: str) -> float:
     if not row.is_won:
         return 0.0
     raw = float(getattr(row, end_col) - getattr(row, start_col))
+    variant = "v32" if start_col.endswith("_v32") else "v31" if start_col.endswith("_v31") else "v3"
+    scale = XT_V32_SCALE if variant == "v32" else 1.0
     if raw >= 0:
         adjusted = raw * _v3_short_pass_multiplier(row.pass_distance)
-        return min(adjusted, _v3_zone_max_pass_delta(row.x_start))
+        return min(adjusted, _v3_zone_max_pass_delta(row.x_start) * scale)
     lat_start = _lateral_frac(row.y_start)
     lat_end = _lateral_frac(row.y_end)
     if row.x_start < XT_V3_NEG_RECYCLE_X_MAX:
@@ -631,7 +657,8 @@ def _adjust_heuristic_v3_variant_pass_delta(row, start_col: str, end_col: str) -
         and lat_start > XT_V3_WIDE_FRAC
         and lat_end < lat_start - 0.12
     ):
-        adjusted += XT_V3_PRESSURE_ESCAPE_BONUS
+        bonus = XT_V32_PRESSURE_ESCAPE_BONUS if variant == "v32" else XT_V3_PRESSURE_ESCAPE_BONUS
+        adjusted += bonus
     return adjusted
 
 
@@ -673,11 +700,23 @@ def classify_xt_progressive_v3_adjusted(
     delta_xt: float,
     x_end: float,
     pass_distance: float,
+    *,
+    variant: str = "v3",
 ) -> str:
     if delta_xt <= 0:
         return "none"
-    prog_thresh = max(XT_V3_PROG_FLOOR_CLASS, XT_V3_PROG_SCALE_CLASS * (1.0 - xt_start))
-    high_thresh = max(XT_V3_HIGH_FLOOR_CLASS, XT_V3_HIGH_SCALE_CLASS * (1.0 - xt_start))
+    if variant == "v32":
+        prog_floor = XT_V32_PROG_FLOOR_CLASS
+        high_floor = XT_V32_HIGH_FLOOR_CLASS
+        prog_scale = XT_V32_PROG_SCALE_CLASS
+        high_scale = XT_V32_HIGH_SCALE_CLASS
+    else:
+        prog_floor = XT_V3_PROG_FLOOR_CLASS
+        high_floor = XT_V3_HIGH_FLOOR_CLASS
+        prog_scale = XT_V3_PROG_SCALE_CLASS
+        high_scale = XT_V3_HIGH_SCALE_CLASS
+    prog_thresh = max(prog_floor, prog_scale * (1.0 - xt_start))
+    high_thresh = max(high_floor, high_scale * (1.0 - xt_start))
     if delta_xt <= prog_thresh:
         return "none"
     if delta_xt > high_thresh:
@@ -716,26 +755,28 @@ def progressive_delta_for_attempt(row, cols: dict[str, str] | None = None) -> fl
 
 
 def is_impact_attempt(row, cols: dict[str, str] | None = None) -> bool:
-    cols = cols or _xt_column_set("v3")
+    cols = cols or _primary_xt_cols()
+    variant = _variant_key_from_cols(cols)
     delta = progressive_delta_for_attempt(row, cols)
     return classify_xt_progressive_v3_adjusted(
-        getattr(row, cols["start"]), delta, row.x_end, row.pass_distance
+        getattr(row, cols["start"]), delta, row.x_end, row.pass_distance, variant=variant
     ) in ("progressive", "highly")
 
 
 def is_high_impact_attempt(row, cols: dict[str, str] | None = None) -> bool:
-    cols = cols or _xt_column_set("v3")
+    cols = cols or _primary_xt_cols()
+    variant = _variant_key_from_cols(cols)
     delta = progressive_delta_for_attempt(row, cols)
     return (
         classify_xt_progressive_v3_adjusted(
-            getattr(row, cols["start"]), delta, row.x_end, row.pass_distance
+            getattr(row, cols["start"]), delta, row.x_end, row.pass_distance, variant=variant
         )
         == "highly"
     )
 
 
 def is_impact_pass_attempt(row, cols: dict[str, str] | None = None) -> bool:
-    cols = cols or _xt_column_set("v31")
+    cols = cols or _primary_xt_cols()
     if not row.has_end:
         return False
     if not pass_approaches_goal(row.x_start, row.y_start, row.x_end, row.y_end):
@@ -744,7 +785,7 @@ def is_impact_pass_attempt(row, cols: dict[str, str] | None = None) -> bool:
 
 
 def is_high_impact_pass_attempt(row, cols: dict[str, str] | None = None) -> bool:
-    cols = cols or _xt_column_set("v31")
+    cols = cols or _primary_xt_cols()
     if not row.has_end:
         return False
     if not pass_approaches_goal(row.x_start, row.y_start, row.x_end, row.y_end):
@@ -823,19 +864,19 @@ def enrich_with_xt_v3(df: pd.DataFrame) -> pd.DataFrame:
     ].values
 
     pass_mask = out["category"] == "passes"
-    cols_v31 = _xt_column_set("v31")
+    cols_primary = _primary_xt_cols()
     for idx, row in out.loc[pass_mask].iterrows():
         out.at[idx, "progressive"] = bool(
             row.is_won
             and is_progressive_wyscout(row.x_start, row.y_start, row.x_end, row.y_end)
         )
-        out.at[idx, "impact_pass"] = bool(row.is_won and is_impact_pass_attempt(row, cols_v31))
-        out.at[idx, "high_impact_pass"] = bool(row.is_won and is_high_impact_pass_attempt(row, cols_v31))
+        out.at[idx, "impact_pass"] = bool(row.is_won and is_impact_pass_attempt(row, cols_primary))
+        out.at[idx, "high_impact_pass"] = bool(row.is_won and is_high_impact_pass_attempt(row, cols_primary))
 
     carry_mask = out["category"] == "ball-carries"
     for idx, row in out.loc[carry_mask].iterrows():
-        out.at[idx, "impact_carry"] = bool(row.is_won and is_impact_attempt(row, cols_v31))
-        out.at[idx, "high_impact_carry"] = bool(row.is_won and is_high_impact_attempt(row, cols_v31))
+        out.at[idx, "impact_carry"] = bool(row.is_won and is_impact_attempt(row, cols_primary))
+        out.at[idx, "high_impact_carry"] = bool(row.is_won and is_high_impact_attempt(row, cols_primary))
 
     return out
 
@@ -1022,11 +1063,11 @@ def _is_prog_wyscout_row(row) -> bool:
 
 # ── STATS ────────────────────────────────────────────────────
 def compute_player_stats(df: pd.DataFrame) -> dict:
-    """Player stats using heuristic xT v3.1 only."""
+    """Player stats using heuristic xT v3.2 (primary model)."""
     passes = df[df["category"] == "passes"]
     carries = df[df["category"] == "ball-carries"]
     empty_cls = {"successful": 0, "attempted": 0, "accuracy_pct": 0.0}
-    cols = _xt_column_set("v31")
+    cols = _primary_xt_cols()
     delta_col, end_col = cols["delta"], cols["end"]
 
     total_passes = len(passes)
@@ -1244,16 +1285,16 @@ def render_impact_card(stats: dict, tone: str) -> None:
     carry_high = stats["high_impact_carry"]
     prog = stats["progressive_wyscout"]
     stats_section_card(
-        "Impact (xT v3.1)",
+        "Impact (xT v3.2)",
         tone,
         [
-            ("Pass Impact (xT v3.1)", _fmt_decimal(stats["sum_dxt_passes"])),
+            ("Pass Impact (xT v3.2)", _fmt_decimal(stats["sum_dxt_passes"])),
             ("ΔxT passes campo ofensivo", _fmt_decimal(stats["sum_dxt_passes_offensive"])),
             ("Σ xT final passes", _fmt_decimal(stats["sum_xt_end_passes"])),
             ("Σ xT final bolas longas", _fmt_decimal(stats["sum_xt_end_long_balls"])),
-            ("Carry Impact (xT v3.1)", _fmt_decimal(stats["sum_dxt_carries"])),
+            ("Carry Impact (xT v3.2)", _fmt_decimal(stats["sum_dxt_carries"])),
             (
-                "Total Impact (xT v3.1)",
+                "Total Impact (xT v3.2)",
                 _fmt_decimal(stats["sum_dxt_passes"] + stats["sum_dxt_carries"]),
             ),
             ("Σ xT terço final", _fmt_decimal(stats["sum_xt_end_final_third"])),
@@ -1269,7 +1310,7 @@ def render_impact_card(stats: dict, tone: str) -> None:
 
 def render_xt_efficiency_card(stats: dict, tone: str) -> None:
     stats_section_card(
-        "Eficiência xT (v3.1)",
+        "Eficiência xT (v3.2)",
         tone,
         [
             ("xT / passe", _fmt_decimal(stats["xt_per_pass"], decimals=3)),
@@ -1373,7 +1414,7 @@ def filter_impact_plays(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def draw_impact_plays_map(df: pd.DataFrame, player_name: str, match_label: str):
-    """Successful impact passes (goal approach + xT v3.1) and impact carries."""
+    """Successful impact passes (goal approach + xT v3.2) and impact carries."""
     actions = filter_impact_plays(df)
 
     fig, ax, pitch = _base_pitch()
@@ -1421,7 +1462,7 @@ def draw_impact_plays_map(df: pd.DataFrame, player_name: str, match_label: str):
     ]
     _add_map_legend(ax, legend_handles)
     ax.set_title(
-        f"{player_name}\nImpact Plays · xT v3.1 · {match_label}",
+        f"{player_name}\nImpact Plays · xT v3.2 · {match_label}",
         color="white", fontsize=8.8 * scale, pad=5,
     )
     _attack_arrow(fig)
@@ -1749,7 +1790,7 @@ def render_comparison(
             )
             _show_map(
                 lambda d, n, m: draw_top_deltaxt_map(
-                    d, n, m, delta_col="delta_xt_v31", model_label="v3.1"
+                    d, n, m, delta_col="delta_xt_v32", model_label="v3.2"
                 ),
                 df, player["name"], match_label,
                 "Sem ações com ΔxT positivo.",
@@ -1760,7 +1801,7 @@ def render_stats_tab(player_data: dict[str, pd.DataFrame], match_selection: str)
     match_label = _match_scope_label(match_selection)
     st.markdown("### Estatísticas")
     st.caption(
-        f"Recorte: **{match_label}** · xT heurístico **v3.1** · "
+        f"Recorte: **{match_label}** · xT heurístico **v3.2** · "
         "Finalizações, xG, assistências e xA não constam nos CSVs Wyscout exportados."
     )
 
@@ -2037,7 +2078,7 @@ st.markdown(
     <div style="text-align:center;margin-bottom:1rem;">
       <h1 style="margin:0;color:#eef1f7;">WC Player Analysis — Top ΔxT</h1>
       <p style="color:#94a3b8;font-size:0.95rem;margin-top:0.35rem;">
-        Bruno Guimarães · Casemiro · Lucas Paquetá — xT Heurístico v3.1
+        Bruno Guimarães · Casemiro · Lucas Paquetá — xT Heurístico v3.2
       </p>
     </div>
     """,
@@ -2074,11 +2115,11 @@ with st.sidebar:
         value=False,
         help=(
             "Mostra um mapa unificado só com passes certos de impacto "
-            "(≥5 m ao gol no terço final, ≥10 m no restante do campo + xT v3.1) "
+            "(≥5 m ao gol no terço final, ≥10 m no restante do campo + xT v3.2) "
             "e conduções de impacto."
         ),
     )
-    st.caption("xT v3.1 · v3.2 · Markov · Progressivos Wyscout · Stats gerais")
+    st.caption("xT v3.2 · Markov · Progressivos Wyscout · Stats gerais")
 
 tab_analysis, tab_stats, tab_compare = st.tabs(
     ["Análise", "Stats", "Comparar modelos"]
