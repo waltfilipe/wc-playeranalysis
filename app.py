@@ -60,7 +60,7 @@ ARROW_HEADLENGTH = 1.15
 ARROW_ALPHA = 0.68
 ARROW_ALPHA_EMPH = 0.82
 ALL_MATCHES_LABEL = "All Matches"
-DATA_CACHE_VERSION = 18
+DATA_CACHE_VERSION = 19
 XT_ZONE_COLS = 3
 XT_ZONE_ROWS = 2
 NX_XT = 16
@@ -127,7 +127,8 @@ CARD_TITLE_TEXT = "14px"
 CARD_LABEL_TEXT = "16px"
 CARD_INNER_BORDER = "rgba(107,114,128,0.45)"
 TOP_DELTAXT_N = 10
-IMPACT_PASS_MIN_GOAL_APPROACH = 5.0
+IMPACT_PASS_MIN_GOAL_APPROACH_FINAL_THIRD = 5.0
+IMPACT_PASS_MIN_GOAL_APPROACH_REST = 10.0
 EXCLUDED_CSV = {"enzo.csv"}
 
 PLAYERS = [
@@ -166,16 +167,21 @@ def distance_to_goal(x: float, y: float) -> float:
     return float(np.sqrt((GOAL_X - x) ** 2 + (GOAL_Y - y) ** 2))
 
 
+def pass_min_goal_approach(x_end: float) -> float:
+    """Minimum goal approach (m) by pass end zone: 5 m in final third, 10 m elsewhere."""
+    if x_end >= FINAL_THIRD_LINE_X:
+        return IMPACT_PASS_MIN_GOAL_APPROACH_FINAL_THIRD
+    return IMPACT_PASS_MIN_GOAL_APPROACH_REST
+
+
 def pass_approaches_goal(
     x_start: float,
     y_start: float,
     x_end: float,
     y_end: float,
-    *,
-    min_meters: float = IMPACT_PASS_MIN_GOAL_APPROACH,
 ) -> bool:
     progress = distance_to_goal(x_start, y_start) - distance_to_goal(x_end, y_end)
-    return progress >= min_meters
+    return progress >= pass_min_goal_approach(x_end)
 
 
 def is_progressive_wyscout(x_start: float, y_start: float, x_end: float, y_end: float) -> bool:
@@ -1259,7 +1265,7 @@ def filter_impact_plays(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def draw_impact_plays_map(df: pd.DataFrame, player_name: str, match_label: str):
-    """Successful impact passes (≥5 m ao gol + xT v3.1) and impact carries."""
+    """Successful impact passes (goal approach + xT v3.1) and impact carries."""
     actions = filter_impact_plays(df)
 
     fig, ax, pitch = _base_pitch()
@@ -1820,7 +1826,11 @@ with st.sidebar:
     impact_plays_only = st.checkbox(
         "Apenas impact plays nos mapas",
         value=False,
-        help="Mostra um mapa unificado só com passes certos de impacto (≥5 m ao gol + xT v3.1) e conduções de impacto.",
+        help=(
+            "Mostra um mapa unificado só com passes certos de impacto "
+            "(≥5 m ao gol no terço final, ≥10 m no restante do campo + xT v3.1) "
+            "e conduções de impacto."
+        ),
     )
     st.caption("xT v3.1 · Progressivos Wyscout · Stats gerais")
 
