@@ -39,12 +39,20 @@ def add_spadl_names(actions: pd.DataFrame) -> pd.DataFrame:
 
 
 def gamestates(actions: pd.DataFrame, nb_prev_actions: int = 3) -> list[pd.DataFrame]:
+    """Previous-action windows per game/period (socceraction-compatible)."""
     states = [actions]
+    first_row = actions.iloc[0]
+    group_cols = ["game_id", "period_id"]
+    value_cols = [c for c in actions.columns if c not in group_cols]
+
     for i in range(1, nb_prev_actions):
-        prev_actions = actions.groupby(["game_id", "period_id"], sort=False, as_index=False).apply(
-            lambda x: x.shift(i, fill_value=float("nan")).fillna(x.iloc[0]),  # noqa: B023
-            include_groups=False,
-        )
+        prev_actions = actions.copy()
+        grouped = actions.groupby(group_cols, sort=False)
+        for col in value_cols:
+            prev_actions[col] = grouped[col].shift(i)
+        for col in group_cols:
+            prev_actions[col] = actions[col].values
+        prev_actions = prev_actions.fillna(first_row)
         prev_actions.index = actions.index.copy()
         states.append(prev_actions)
     return states
