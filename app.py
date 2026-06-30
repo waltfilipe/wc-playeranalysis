@@ -926,10 +926,12 @@ def compute_player_stats(df: pd.DataFrame) -> dict:
             "sum_dxt_carries": 0.0,
             "sum_xt_end_passes": 0.0,
             "sum_xt_end_final_third": 0.0,
+            "sum_xt_end_long_balls": 0.0,
             "pos_pct": 0.0,
             "xt_per_pass": 0.0,
             "xt_per_prog_pass": 0.0,
             "xt_per_impact_pass": 0.0,
+            "xt_per_long_ball": 0.0,
             "by_action_type": df.groupby("action_type").size().to_dict() if not df.empty else {},
         }
 
@@ -968,6 +970,10 @@ def compute_player_stats(df: pd.DataFrame) -> dict:
     sum_dxt_passes = float(passes[delta_col].sum())
     sum_dxt_carries = float(carries[delta_col].sum())
     sum_xt_end_passes = float(completed_passes[end_col].sum()) if not completed_passes.empty else 0.0
+    completed_long_balls = completed_passes[completed_passes["is_long_ball"]]
+    sum_xt_end_long_balls = (
+        float(completed_long_balls[end_col].sum()) if not completed_long_balls.empty else 0.0
+    )
 
     final_third_won = df[
         df["category"].isin(["passes", "ball-carries"])
@@ -998,10 +1004,12 @@ def compute_player_stats(df: pd.DataFrame) -> dict:
         "sum_dxt_carries": sum_dxt_carries,
         "sum_xt_end_passes": sum_xt_end_passes,
         "sum_xt_end_final_third": sum_xt_end_final_third,
+        "sum_xt_end_long_balls": sum_xt_end_long_balls,
         "pos_pct": pos_pct,
-        "xt_per_pass": _safe_ratio(sum_dxt_passes, total_passes),
+        "xt_per_pass": _safe_ratio(sum_xt_end_passes, len(completed_passes)),
         "xt_per_prog_pass": _safe_ratio(float(prog_success[delta_col].sum()), len(prog_success)),
         "xt_per_impact_pass": _safe_ratio(float(impact_success[delta_col].sum()), len(impact_success)),
+        "xt_per_long_ball": _safe_ratio(sum_xt_end_long_balls, len(completed_long_balls)),
         "by_action_type": df.groupby("action_type").size().to_dict(),
     }
 
@@ -1093,6 +1101,7 @@ def render_impact_card(stats: dict, tone: str) -> None:
         [
             ("Pass Impact (xT v3.1)", _fmt_decimal(stats["sum_dxt_passes"])),
             ("Σ xT final passes", _fmt_decimal(stats["sum_xt_end_passes"])),
+            ("Σ xT final bolas longas", _fmt_decimal(stats["sum_xt_end_long_balls"])),
             ("Carry Impact (xT v3.1)", _fmt_decimal(stats["sum_dxt_carries"])),
             (
                 "Total Impact (xT v3.1)",
@@ -1117,6 +1126,7 @@ def render_xt_efficiency_card(stats: dict, tone: str) -> None:
             ("xT / passe", _fmt_decimal(stats["xt_per_pass"], decimals=3)),
             ("xT / passe prog.", _fmt_decimal(stats["xt_per_prog_pass"], decimals=3)),
             ("xT / impact passe", _fmt_decimal(stats["xt_per_impact_pass"], decimals=3)),
+            ("xT / bola longa", _fmt_decimal(stats["xt_per_long_ball"], decimals=3)),
         ],
     )
 
