@@ -62,8 +62,8 @@ ARROW_HEADWIDTH = 1.15
 ARROW_HEADLENGTH = 1.15
 ARROW_ALPHA = 0.68
 ARROW_ALPHA_EMPH = 0.82
-ALL_MATCHES_LABEL = "All Matches"
-DATA_CACHE_VERSION = 27
+ALL_GAMES_LABEL = "todos os jogos"
+DATA_CACHE_VERSION = 28
 XT_ZONE_COLS = 3
 XT_ZONE_ROWS = 2
 NX_XT = 16
@@ -161,11 +161,14 @@ TOP_DELTAXT_N = 10
 IMPACT_PASS_MIN_GOAL_APPROACH_FINAL_THIRD = 5.0
 IMPACT_PASS_MIN_GOAL_APPROACH_REST = 10.0
 EXCLUDED_CSV = {"enzo.csv"}
+CSV_X_FLIP_MATCHES = frozenset({"Uruguay"})
 
 PLAYERS = [
-    {"code": "BG", "name": "Bruno Guimarães", "tone": "#5b9bd5"},
-    {"code": "CS", "name": "Casemiro", "tone": "#e67e22"},
-    {"code": "LP", "name": "Lucas Paquetá", "tone": "#22c55e"},
+    {"code": "BG", "name": "Bruno Guimarães", "tone": "#5b9bd5", "glob": "BG-vs *.csv"},
+    {"code": "CS", "name": "Casemiro", "tone": "#e67e22", "glob": "CS-vs *.csv"},
+    {"code": "LP", "name": "Lucas Paquetá", "tone": "#22c55e", "glob": "LP-vs *.csv"},
+    {"code": "PD", "name": "Pedri", "tone": "#9333ea", "glob": "Pedri-vs *.csv"},
+    {"code": "RD", "name": "Rodri", "tone": "#dc2626", "glob": "Rodri-vs *.csv"},
 ]
 
 CMAP_PASS = LinearSegmentedColormap.from_list(
@@ -932,7 +935,18 @@ def discover_csv_files(base_dir: Path | None = None) -> list[Path]:
     )
 
 
-def load_player_csv(path: Path) -> pd.DataFrame:
+def _match_slug_from_csv(path: Path) -> str:
+    stem = path.stem
+    if "-vs " in stem:
+        return stem.split("-vs ", 1)[1]
+    return stem
+
+
+def _csv_needs_x_flip(path: Path) -> bool:
+    return _match_slug_from_csv(path) in CSV_X_FLIP_MATCHES
+
+
+def load_player_csv(path: Path, *, flip_x: bool = False) -> pd.DataFrame:
     frame = pd.read_csv(path)
     required = {"category", "eventActionType", "start_x", "start_y"}
     missing = required - set(frame.columns)
@@ -942,11 +956,15 @@ def load_player_csv(path: Path) -> pd.DataFrame:
     rows = []
 
     for idx, row in frame.iterrows():
-        sx, sy = wyscout_to_statsbomb(float(row["start_x"]), float(row["start_y"]))
+        sx, sy = wyscout_to_statsbomb(
+            float(row["start_x"]), float(row["start_y"]), flip_x=flip_x
+        )
         has_end = _has_coords(row, "end")
         ex = ey = np.nan
         if has_end:
-            ex, ey = wyscout_to_statsbomb(float(row["end_x"]), float(row["end_y"]))
+            ex, ey = wyscout_to_statsbomb(
+                float(row["end_x"]), float(row["end_y"]), flip_x=flip_x
+            )
 
         rows.append(
             {
@@ -970,21 +988,23 @@ def load_player_csv(path: Path) -> pd.DataFrame:
     return enrich_with_xt_v3(pd.DataFrame(rows))
 
 
-def load_player_all_matches(code: str, name: str, base_dir: Path | None = None) -> pd.DataFrame:
-    """Aggregate all match CSVs for a player code (BG, CS, LP)."""
+def load_player_all_matches(player: dict, base_dir: Path | None = None) -> pd.DataFrame:
+    """Aggregate all match CSVs for a player entry in PLAYERS."""
     root = base_dir or Path(__file__).resolve().parent
-    files = sorted(root.glob(f"{code}-vs *.csv"))
+    pattern = player.get("glob", f"{player['code']}-vs *.csv")
+    files = sorted(root.glob(pattern))
     if not files:
         return pd.DataFrame()
 
     frames = []
     for path in files:
-        match_df = load_player_csv(path)
-        match_df["match"] = path.stem.replace(f"{code}-", "")
+        flip_x = _csv_needs_x_flip(path)
+        match_df = load_player_csv(path, flip_x=flip_x)
+        match_df["match"] = _match_slug_from_csv(path)
         frames.append(match_df)
 
     combined = pd.concat(frames, ignore_index=True)
-    combined["player"] = name
+    combined["player"] = player["name"]
     try:
         combined = apply_external_models(combined)
     except FileNotFoundError:
@@ -1005,26 +1025,6 @@ def top_deltaxt_actions(
     if actions.empty:
         return actions
     return actions.nlargest(n, delta_col)
-
-
-def get_available_matches(player_data: dict[str, pd.DataFrame]) -> list[str]:
-    matches: set[str] = set()
-    for df in player_data.values():
-        if not df.empty and "match" in df.columns:
-            matches.update(df["match"].dropna().unique())
-    return sorted(matches)
-
-
-def filter_by_match(df: pd.DataFrame, match_selection: str) -> pd.DataFrame:
-    if df.empty or match_selection == ALL_MATCHES_LABEL:
-        return df
-    if "match" not in df.columns:
-        return df
-    return df[df["match"] == match_selection].copy()
-
-
-def _match_scope_label(match_selection: str) -> str:
-    return "todos os jogos" if match_selection == ALL_MATCHES_LABEL else match_selection
 
 
 def _safe_ratio(numerator: float, denominator: int, *, decimals: int = 3) -> float:
@@ -1741,9 +1741,9 @@ def zone_xt_means(grid: np.ndarray, n_x: int = XT_ZONE_COLS, n_y: int = XT_ZONE_
 
 
 @st.cache_data(show_spinner=False)
-def load_all_three_players(_cache_version: int = DATA_CACHE_VERSION) -> dict[str, pd.DataFrame]:
+def load_all_players(_cache_version: int = DATA_CACHE_VERSION) -> dict[str, pd.DataFrame]:
     return {
-        player["code"]: load_player_all_matches(player["code"], player["name"])
+        player["code"]: load_player_all_matches(player)
         for player in PLAYERS
     }
 
@@ -1759,17 +1759,16 @@ def _show_map(draw_fn, df: pd.DataFrame, player_name: str, match_label: str, emp
 
 def render_comparison(
     player_data: dict[str, pd.DataFrame],
-    match_selection: str,
     *,
     impact_plays_only: bool = False,
 ) -> None:
-    match_label = _match_scope_label(match_selection)
-    map_cols = st.columns(3)
+    match_label = ALL_GAMES_LABEL
+    map_cols = st.columns(len(PLAYERS))
 
     for col, player in zip(map_cols, PLAYERS):
         with col:
             st.markdown(f'<div class="player-header">{player["name"]}</div>', unsafe_allow_html=True)
-            df = filter_by_match(player_data[player["code"]], match_selection)
+            df = player_data[player["code"]]
 
             if df.empty:
                 st.warning(f"Sem dados para {player['name']}.")
@@ -1801,19 +1800,18 @@ def render_comparison(
             )
 
 
-def render_stats_tab(player_data: dict[str, pd.DataFrame], match_selection: str) -> None:
-    match_label = _match_scope_label(match_selection)
+def render_stats_tab(player_data: dict[str, pd.DataFrame]) -> None:
     st.markdown("### Estatísticas")
     st.caption(
-        f"Recorte: **{match_label}** · xT heurístico **v3.2** · "
+        f"**{ALL_GAMES_LABEL.capitalize()}** · xT heurístico **v3.2** · "
         "Finalizações, xG, assistências e xA não constam nos CSVs Wyscout exportados."
     )
 
-    stat_cols = st.columns(3)
+    stat_cols = st.columns(len(PLAYERS))
     for col, player in zip(stat_cols, PLAYERS):
         with col:
             st.markdown(f'<div class="player-header">{player["name"]}</div>', unsafe_allow_html=True)
-            df = filter_by_match(player_data[player["code"]], match_selection)
+            df = player_data[player["code"]]
             if df.empty:
                 st.warning(f"Sem dados para {player['name']}.")
                 continue
@@ -1825,10 +1823,10 @@ def render_stats_tab(player_data: dict[str, pd.DataFrame], match_selection: str)
 
 
 def render_xt_model_comparison(
-    player_data: dict[str, pd.DataFrame], match_selection: str
+    player_data: dict[str, pd.DataFrame],
 ) -> None:
     """Compare xT v3 original vs v3.1 (transições suaves)."""
-    match_label = _match_scope_label(match_selection)
+    match_label = ALL_GAMES_LABEL
 
     compare_models = [
         {
@@ -1904,7 +1902,7 @@ def render_xt_model_comparison(
 
     summary_rows = []
     for player in PLAYERS:
-        df = filter_by_match(player_data[player["code"]], match_selection)
+        df = player_data[player["code"]]
         st.markdown(f'<div class="player-header">{player["name"]}</div>', unsafe_allow_html=True)
 
         if df.empty:
@@ -1937,7 +1935,7 @@ def render_xt_model_comparison(
         st.markdown("### Resumo comparativo")
         st.dataframe(pd.DataFrame(summary_rows), use_container_width=True, hide_index=True)
 
-    _render_external_model_comparison(player_data, match_selection)
+    _render_external_model_comparison(player_data)
 
 
 def _xt_action_mask(df: pd.DataFrame) -> pd.Series:
@@ -1952,10 +1950,10 @@ def _model_correlation(df: pd.DataFrame, col_a: str, col_b: str) -> float | None
 
 
 def _render_external_model_comparison(
-    player_data: dict[str, pd.DataFrame], match_selection: str
+    player_data: dict[str, pd.DataFrame],
 ) -> None:
     """Compare heuristic v3.1, v3.2 and xT Markov."""
-    match_label = _match_scope_label(match_selection)
+    match_label = ALL_GAMES_LABEL
 
     markov_ok = any(
         "delta_xt_markov" in df.columns and df["delta_xt_markov"].notna().any()
@@ -2020,7 +2018,7 @@ def _render_external_model_comparison(
     corr_rows: list[dict] = []
 
     for player in PLAYERS:
-        df = filter_by_match(player_data[player["code"]], match_selection)
+        df = player_data[player["code"]]
         st.markdown(f'<div class="player-header">{player["name"]}</div>', unsafe_allow_html=True)
 
         if df.empty:
@@ -2082,7 +2080,7 @@ st.markdown(
     <div style="text-align:center;margin-bottom:1rem;">
       <h1 style="margin:0;color:#eef1f7;">WC Player Analysis — Top ΔxT</h1>
       <p style="color:#94a3b8;font-size:0.95rem;margin-top:0.35rem;">
-        Bruno Guimarães · Casemiro · Lucas Paquetá — xT Heurístico v3.2
+        Bruno Guimarães · Casemiro · Lucas Paquetá · Pedri · Rodri — xT Heurístico v3.2
       </p>
     </div>
     """,
@@ -2091,12 +2089,13 @@ st.markdown(
 
 player_data = {
     code: ensure_xt_model_columns(df)
-    for code, df in load_all_three_players().items()
+    for code, df in load_all_players().items()
 }
 if not any(not df.empty for df in player_data.values()):
     st.error(
         "Nenhum CSV de jogador encontrado. "
-        "Esperado: `BG-vs *.csv`, `CS-vs *.csv`, `LP-vs *.csv`."
+        "Esperado: `BG-vs *.csv`, `CS-vs *.csv`, `LP-vs *.csv`, "
+        "`Pedri-vs *.csv`, `Rodri-vs *.csv`."
     )
     st.stop()
 
@@ -2104,15 +2103,12 @@ with st.sidebar:
     st.markdown(
         """
         <div style="text-align:center;">
-          <h3 style="margin:0;color:#eef1f7;">Partidas</h3>
-          <p style="color:#94a3b8;font-size:0.85rem;">Filtrar mapas e stats</p>
+          <h3 style="margin:0;color:#eef1f7;">Opções</h3>
+          <p style="color:#94a3b8;font-size:0.85rem;">Mapas · todos os jogos</p>
         </div>
         """,
         unsafe_allow_html=True,
     )
-    st.markdown("---")
-    match_options = [ALL_MATCHES_LABEL, *get_available_matches(player_data)]
-    selected_match = st.selectbox("Selecionar partida", match_options, label_visibility="collapsed")
     st.markdown("---")
     impact_plays_only = st.checkbox(
         "Apenas impact plays nos mapas",
@@ -2123,17 +2119,17 @@ with st.sidebar:
             "e conduções de impacto."
         ),
     )
-    st.caption("xT v3.2 · Markov · Progressivos Wyscout · Stats gerais")
+    st.caption("xT v3.2 · Markov · 5 jogadores · Stats agregadas")
 
 tab_analysis, tab_stats, tab_compare = st.tabs(
     ["Análise", "Stats", "Comparar modelos"]
 )
 
 with tab_analysis:
-    render_comparison(player_data, selected_match, impact_plays_only=impact_plays_only)
+    render_comparison(player_data, impact_plays_only=impact_plays_only)
 
 with tab_stats:
-    render_stats_tab(player_data, selected_match)
+    render_stats_tab(player_data)
 
 with tab_compare:
-    render_xt_model_comparison(player_data, selected_match)
+    render_xt_model_comparison(player_data)
