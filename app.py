@@ -63,7 +63,7 @@ ARROW_HEADLENGTH = 1.15
 ARROW_ALPHA = 0.68
 ARROW_ALPHA_EMPH = 0.82
 ALL_MATCHES_LABEL = "All Matches"
-DATA_CACHE_VERSION = 26
+DATA_CACHE_VERSION = 27
 XT_ZONE_COLS = 3
 XT_ZONE_ROWS = 2
 NX_XT = 16
@@ -126,12 +126,15 @@ XT_V31_MAX_COL_STEP_DEF = 0.050
 XT_V31_MAX_COL_STEP_ATT = 0.078
 XT_V31_ATT_COL_START = 10
 
-# xT Heurístico v3.2 — quadrantes v3.1 (escala baixa) + bônus suave Markov por zona
+# xT Heurístico v3.2 — base uniforme entre quadrantes + bônus Markov mais forte
 XT_MODEL_HEURISTIC_V32 = "heuristic_v32"
-XT_V32_BASE_MAX = 0.11
-XT_V32_QUADRANT_BONUS_MAX = 0.10
-XT_V32_BONUS_SIGMA_X = 4.0
-XT_V32_BONUS_SIGMA_Y = 2.0
+XT_V32_BASE_FLOOR = 0.055
+XT_V32_BASE_SPREAD = 0.042
+XT_V32_BASE_SHAPE_GAMMA = 0.85
+XT_V32_QUADRANT_BONUS_MAX = 0.15
+XT_V32_BONUS_POWER = 1.10
+XT_V32_BONUS_SIGMA_X = 3.0
+XT_V32_BONUS_SIGMA_Y = 1.5
 XT_V32_SURFACE_MAX = 0.24
 XT_V32_GAUSS_SIGMA_X = 0.0
 XT_V32_GAUSS_SIGMA_Y = 0.0
@@ -575,10 +578,10 @@ def compute_markov_fine_grid(
 
 
 def _markov_bonus_field(nx: int, ny: int) -> np.ndarray:
-    """Smooth per-zone bonus from Markov quadrant values (0 → max bonus)."""
+    """Per-zone bonus from Markov (emphasized peaks, less blur)."""
     markov = compute_markov_fine_grid(nx, ny)
     peak = max(float(markov.max()), 1e-9)
-    rel = markov / peak
+    rel = (markov / peak) ** XT_V32_BONUS_POWER
     return _gaussian_smooth_2d(
         rel * XT_V32_QUADRANT_BONUS_MAX,
         XT_V32_BONUS_SIGMA_X,
@@ -587,10 +590,11 @@ def _markov_bonus_field(nx: int, ny: int) -> np.ndarray:
 
 
 def _build_heuristic_v32_threat_surface(Xc: np.ndarray, Yc: np.ndarray) -> np.ndarray:
-    """v3.1 zone profile (low scale) + smoothed Markov quadrant bonus."""
+    """Flattened v3.1 base + stronger Markov quadrant bonus."""
     v31 = _build_heuristic_v31_threat_surface(Xc, Yc)
     peak = max(float(v31.max()), 1e-9)
-    base = (v31 / peak) * XT_V32_BASE_MAX
+    rel = (v31 / peak) ** XT_V32_BASE_SHAPE_GAMMA
+    base = XT_V32_BASE_FLOOR + rel * XT_V32_BASE_SPREAD
     bonus = _markov_bonus_field(Xc.shape[1], Xc.shape[0])
     return np.clip(base + bonus, 0.0, XT_V32_SURFACE_MAX)
 
@@ -1972,7 +1976,7 @@ def _render_external_model_comparison(
             "delta_col": "delta_xt_v32",
             "grid_fn": compute_heuristic_v32_xt_grid,
             "desc": (
-                "Quadrantes v3.1 (escala baixa) + bônus suave por zona conforme Markov (WSL 2018/19)."
+                "Base uniforme entre quadrantes + bônus Markov reforçado por zona (WSL 2018/19)."
             ),
         },
     ]
@@ -1990,8 +1994,8 @@ def _render_external_model_comparison(
     st.markdown("---")
     st.markdown("### v3.1 · v3.2 · xT Markov")
     st.caption(
-        "O **v3.2** mantém a lógica de quadrantes do v3.1 (transições suaves) em escala baixa, "
-        "somando um bônus suave por zona derivado do grid Markov (WSL 2018/19)."
+        "O **v3.2** usa uma base mais uniforme entre quadrantes (perfil v3.1 comprimido) "
+        "e soma um **bônus Markov reforçado** por zona (WSL 2018/19)."
     )
 
     if not markov_ok:
