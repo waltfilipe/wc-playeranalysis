@@ -60,7 +60,7 @@ ARROW_HEADLENGTH = 1.15
 ARROW_ALPHA = 0.68
 ARROW_ALPHA_EMPH = 0.82
 ALL_MATCHES_LABEL = "All Matches"
-DATA_CACHE_VERSION = 15
+DATA_CACHE_VERSION = 16
 XT_ZONE_COLS = 3
 XT_ZONE_ROWS = 2
 NX_XT = 16
@@ -154,7 +154,7 @@ COLOR_CARRY_BASE_ALPHA = 0.50
 
 # ── COORDINATE HELPERS ───────────────────────────────────────
 def wyscout_to_statsbomb(x: float, y: float, *, flip_x: bool = False) -> tuple[float, float]:
-    """Wyscout 0–100 → StatsBomb 120×80; espelha Y; flip X em jogos fora (isHome=false)."""
+    """Wyscout 0–100 → StatsBomb 120×80; espelha Y para corrigir corredores laterais."""
     x_sb = x * FIELD_X / WYSCOUT_PITCH_SIZE
     y_sb = FIELD_Y - (y * FIELD_Y / WYSCOUT_PITCH_SIZE)
     if flip_x:
@@ -756,15 +756,13 @@ def load_player_csv(path: Path) -> pd.DataFrame:
         raise ValueError(f"Colunas ausentes em {path.name}: {', '.join(sorted(missing))}")
 
     rows = []
-    is_home = _parse_bool(frame["isHome"].iloc[0]) if "isHome" in frame.columns and len(frame) else True
-    flip_x = not is_home
 
     for idx, row in frame.iterrows():
-        sx, sy = wyscout_to_statsbomb(float(row["start_x"]), float(row["start_y"]), flip_x=flip_x)
+        sx, sy = wyscout_to_statsbomb(float(row["start_x"]), float(row["start_y"]))
         has_end = _has_coords(row, "end")
         ex = ey = np.nan
         if has_end:
-            ex, ey = wyscout_to_statsbomb(float(row["end_x"]), float(row["end_y"]), flip_x=flip_x)
+            ex, ey = wyscout_to_statsbomb(float(row["end_x"]), float(row["end_y"]))
 
         rows.append(
             {
