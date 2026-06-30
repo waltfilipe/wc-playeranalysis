@@ -92,7 +92,6 @@ XT_V3_PROG_SCALE_CLASS = 0.17
 XT_V3_HIGH_SCALE_CLASS = 0.40
 XT_V3_PROG_FLOOR_CLASS = 0.10
 XT_V3_HIGH_FLOOR_CLASS = 0.22
-XT_V3_MIN_PASS_DISTANCE = 10.5
 XT_V3_NEG_PENALTY_FACTOR = 0.55
 XT_V3_PRESSURE_ESCAPE_BONUS = 0.02
 XT_V3_PRESSURE_X_MAX = 50.0
@@ -567,8 +566,6 @@ def classify_xt_progressive_v3_adjusted(
     x_end: float,
     pass_distance: float,
 ) -> str:
-    if pass_distance <= XT_V3_MIN_PASS_DISTANCE:
-        return "none"
     if delta_xt <= 0:
         return "none"
     prog_thresh = max(XT_V3_PROG_FLOOR_CLASS, XT_V3_PROG_SCALE_CLASS * (1.0 - xt_start))
@@ -1219,8 +1216,89 @@ def _delicate_arrows(
     )
 
 
-def draw_pass_map(df: pd.DataFrame, player_name: str, match_label: str):
+def filter_impact_plays(df: pd.DataFrame) -> pd.DataFrame:
+    """Keep passes/carries classified as impact attempts (xT v3.1)."""
+    if df.empty:
+        return df
+    cols = _xt_column_set("v31")
+    mask = df.apply(
+        lambda r: (
+            r["category"] in ("passes", "ball-carries")
+            and r["has_end"]
+            and is_impact_attempt(r, cols)
+        ),
+        axis=1,
+    )
+    return df[mask].copy()
+
+
+def draw_impact_plays_map(df: pd.DataFrame, player_name: str, match_label: str):
+    """Passes and carries that qualify as impact attempts (xT v3.1)."""
+    cols = _xt_column_set("v31")
+    actions = df[
+        df["category"].isin(["passes", "ball-carries"]) & df["has_end"]
+    ].copy()
+    actions = actions[actions.apply(lambda r: is_impact_attempt(r, cols), axis=1)]
+
+    fig, ax, pitch = _base_pitch()
+    scale = _map_scale()
+
+    if actions.empty:
+        ax.text(
+            60, 40, "Sem impact plays no recorte",
+            ha="center", va="center", color="white", fontsize=9,
+        )
+    else:
+        for _, row in actions.iterrows():
+            is_pass = row["category"] == "passes"
+            is_lost = is_pass and not row["is_success"]
+            is_high = is_high_impact_attempt(row, cols)
+            if is_lost:
+                color, alpha = COLOR_FAIL, ARROW_ALPHA_EMPH
+            elif is_high:
+                color, alpha = COLOR_HIGHLY_PROGRESSIVE, ARROW_ALPHA_EMPH
+            else:
+                color, alpha = COLOR_PROGRESSIVE, ARROW_ALPHA_EMPH
+
+            _delicate_arrows(
+                pitch, ax,
+                row["x_start"], row["y_start"], row["x_end"], row["y_end"],
+                color, scale, alpha=alpha,
+            )
+            if is_pass:
+                pitch.scatter(
+                    row["x_start"], row["y_start"],
+                    s=PASS_START_MARKER_SIZE + 2, marker="o", color=color,
+                    edgecolors="white", linewidths=0.3, ax=ax, zorder=6, alpha=alpha,
+                )
+            else:
+                pitch.scatter(
+                    row["x_end"], row["y_end"],
+                    s=CARRY_START_MARKER_SIZE + 4, marker="s", color=color,
+                    edgecolors="white", linewidths=0.3, ax=ax, zorder=6, alpha=alpha,
+                )
+
+    legend_handles = [
+        Line2D([0], [0], color=COLOR_PROGRESSIVE, lw=1.4 * scale, label="Impact", alpha=0.80),
+        Line2D([0], [0], color=COLOR_HIGHLY_PROGRESSIVE, lw=1.4 * scale, label="High Impact", alpha=0.85),
+        Line2D([0], [0], color=COLOR_FAIL, lw=1.4 * scale, label="Impact incompleto (passe)", alpha=0.80),
+        Line2D([0], [0], marker="o", color="w", markerfacecolor=COLOR_PROGRESSIVE, markersize=4, linestyle="None", label="Passe"),
+        Line2D([0], [0], marker="s", color="w", markerfacecolor=COLOR_PROGRESSIVE, markersize=4, linestyle="None", label="Condução"),
+    ]
+    _add_map_legend(ax, legend_handles)
+    ax.set_title(
+        f"{player_name}\nImpact Plays · xT v3.1 · {match_label}",
+        color="white", fontsize=8.8 * scale, pad=5,
+    )
+    _attack_arrow(fig)
+    return _save_fig(fig), fig
+
+
+def draw_pass_map(df: pd.DataFrame, player_name: str, match_label: str, *, impact_only: bool = False):
     passes = df[df["category"] == "passes"].copy()
+    if impact_only:
+        cols = _xt_column_set("v31")
+        passes = passes[passes.apply(lambda r: is_impact_attempt(r, cols), axis=1)]
     fig, ax, pitch = _base_pitch()
     scale = _map_scale()
 
@@ -1257,16 +1335,20 @@ def draw_pass_map(df: pd.DataFrame, player_name: str, match_label: str):
         Line2D([0], [0], color=COLOR_FAIL, lw=1.4 * scale, label="Incompleto", alpha=0.80),
     ]
     _add_map_legend(ax, legend_handles)
+    title_suffix = " · Impact" if impact_only else ""
     ax.set_title(
-        f"{player_name}\nPasses · {match_label}",
+        f"{player_name}\nPasses{title_suffix} · {match_label}",
         color="white", fontsize=8.8 * scale, pad=5,
     )
     _attack_arrow(fig)
     return _save_fig(fig), fig
 
 
-def draw_carry_map(df: pd.DataFrame, player_name: str, match_label: str):
+def draw_carry_map(df: pd.DataFrame, player_name: str, match_label: str, *, impact_only: bool = False):
     carries = df[df["category"] == "ball-carries"].copy()
+    if impact_only:
+        cols = _xt_column_set("v31")
+        carries = carries[carries.apply(lambda r: is_impact_attempt(r, cols), axis=1)]
     fig, ax, pitch = _base_pitch()
     scale = _map_scale()
 
@@ -1299,8 +1381,9 @@ def draw_carry_map(df: pd.DataFrame, player_name: str, match_label: str):
         Line2D([0], [0], color=COLOR_HIGHLY_PROGRESSIVE, lw=1.4 * scale, label="High Impact", alpha=0.85),
     ]
     _add_map_legend(ax, legend_handles)
+    title_suffix = " · Impact" if impact_only else ""
     ax.set_title(
-        f"{player_name}\nConduções · {match_label}",
+        f"{player_name}\nConduções{title_suffix} · {match_label}",
         color="white", fontsize=8.8 * scale, pad=5,
     )
     _attack_arrow(fig)
@@ -1497,7 +1580,12 @@ def _show_map(draw_fn, df: pd.DataFrame, player_name: str, match_label: str, emp
     st.image(img, use_container_width=True)
 
 
-def render_comparison(player_data: dict[str, pd.DataFrame], match_selection: str) -> None:
+def render_comparison(
+    player_data: dict[str, pd.DataFrame],
+    match_selection: str,
+    *,
+    impact_plays_only: bool = False,
+) -> None:
     match_label = _match_scope_label(match_selection)
     map_cols = st.columns(3)
 
@@ -1510,11 +1598,18 @@ def render_comparison(player_data: dict[str, pd.DataFrame], match_selection: str
                 st.warning(f"Sem dados para {player['name']}.")
                 continue
 
-            st.markdown('<div class="map-label">Passes</div>', unsafe_allow_html=True)
-            _show_map(draw_pass_map, df, player["name"], match_label, "Sem passes no recorte.")
+            if impact_plays_only:
+                st.markdown('<div class="map-label">Impact Plays</div>', unsafe_allow_html=True)
+                _show_map(
+                    draw_impact_plays_map, df, player["name"], match_label,
+                    "Sem impact plays no recorte.",
+                )
+            else:
+                st.markdown('<div class="map-label">Passes</div>', unsafe_allow_html=True)
+                _show_map(draw_pass_map, df, player["name"], match_label, "Sem passes no recorte.")
 
-            st.markdown('<div class="map-label">Conduções</div>', unsafe_allow_html=True)
-            _show_map(draw_carry_map, df, player["name"], match_label, "Sem conduções no recorte.")
+                st.markdown('<div class="map-label">Conduções</div>', unsafe_allow_html=True)
+                _show_map(draw_carry_map, df, player["name"], match_label, "Sem conduções no recorte.")
 
             st.markdown(
                 f'<div class="map-label">Top {TOP_DELTAXT_N} ΔxT</div>',
@@ -1703,12 +1798,18 @@ with st.sidebar:
     st.markdown("---")
     match_options = [ALL_MATCHES_LABEL, *get_available_matches(player_data)]
     selected_match = st.selectbox("Selecionar partida", match_options, label_visibility="collapsed")
+    st.markdown("---")
+    impact_plays_only = st.checkbox(
+        "Apenas impact plays nos mapas",
+        value=False,
+        help="Mostra um mapa unificado só com passes e conduções classificados como impact (xT v3.1).",
+    )
     st.caption("xT v3.1 · Progressivos Wyscout · Stats gerais")
 
 tab_analysis, tab_stats, tab_compare = st.tabs(["Análise", "Stats", "Comparar xT v3 / v3.1"])
 
 with tab_analysis:
-    render_comparison(player_data, selected_match)
+    render_comparison(player_data, selected_match, impact_plays_only=impact_plays_only)
 
 with tab_stats:
     render_stats_tab(player_data, selected_match)
