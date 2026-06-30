@@ -923,6 +923,7 @@ def compute_player_stats(df: pd.DataFrame) -> dict:
             "impact_carry": empty_cls.copy(),
             "high_impact_carry": empty_cls.copy(),
             "sum_dxt_passes": 0.0,
+            "sum_dxt_passes_offensive": 0.0,
             "sum_dxt_carries": 0.0,
             "sum_xt_end_passes": 0.0,
             "sum_xt_end_final_third": 0.0,
@@ -968,6 +969,10 @@ def compute_player_stats(df: pd.DataFrame) -> dict:
     pos_pct = (pos_count / len(xt_actions) * 100.0) if len(xt_actions) else 0.0
 
     sum_dxt_passes = float(passes[delta_col].sum())
+    offensive_passes = passes[passes["x_start"] >= HALF_LINE_X]
+    sum_dxt_passes_offensive = (
+        float(offensive_passes[delta_col].sum()) if not offensive_passes.empty else 0.0
+    )
     sum_dxt_carries = float(carries[delta_col].sum())
     sum_xt_end_passes = float(completed_passes[end_col].sum()) if not completed_passes.empty else 0.0
     completed_long_balls = completed_passes[completed_passes["is_long_ball"]]
@@ -1001,6 +1006,7 @@ def compute_player_stats(df: pd.DataFrame) -> dict:
         "impact_carry": impact_carry,
         "high_impact_carry": high_impact_carry,
         "sum_dxt_passes": sum_dxt_passes,
+        "sum_dxt_passes_offensive": sum_dxt_passes_offensive,
         "sum_dxt_carries": sum_dxt_carries,
         "sum_xt_end_passes": sum_xt_end_passes,
         "sum_xt_end_final_third": sum_xt_end_final_third,
@@ -1100,6 +1106,7 @@ def render_impact_card(stats: dict, tone: str) -> None:
         tone,
         [
             ("Pass Impact (xT v3.1)", _fmt_decimal(stats["sum_dxt_passes"])),
+            ("ΔxT passes campo ofensivo", _fmt_decimal(stats["sum_dxt_passes_offensive"])),
             ("Σ xT final passes", _fmt_decimal(stats["sum_xt_end_passes"])),
             ("Σ xT final bolas longas", _fmt_decimal(stats["sum_xt_end_long_balls"])),
             ("Carry Impact (xT v3.1)", _fmt_decimal(stats["sum_dxt_carries"])),
