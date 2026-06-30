@@ -68,7 +68,7 @@ ARROW_HEADLENGTH = 1.15
 ARROW_ALPHA = 0.68
 ARROW_ALPHA_EMPH = 0.82
 ALL_MATCHES_LABEL = "All Matches"
-DATA_CACHE_VERSION = 20
+DATA_CACHE_VERSION = 21
 XT_ZONE_COLS = 3
 XT_ZONE_ROWS = 2
 NX_XT = 16
@@ -1875,7 +1875,7 @@ def _render_external_model_comparison(
     )
     vaep_msg = vaep_status_message()
     if vaep_msg:
-        st.info(f"VAEP não carregado neste ambiente: {vaep_msg}")
+        st.warning(f"VAEP não carregado: {vaep_msg}")
 
     try:
         markov_grid = markov_grid_for_display(load_xt_markov_model())

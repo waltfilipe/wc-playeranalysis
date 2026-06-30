@@ -1,8 +1,8 @@
 """External possession-value models: xT Markov and VAEP.
 
-Markov xT is implemented without socceraction so the app can run on Streamlit Cloud
-(Python 3.14). VAEP is loaded lazily via socceraction when that stack is available
-(e.g. local Python 3.11/3.12).
+Markov xT and VAEP inference run without socceraction so the app works on
+Streamlit Cloud (Python 3.14). Training still uses socceraction — see
+scripts/train_external_models.py and scripts/export_vaep_bundle.py.
 """
 
 from __future__ import annotations
@@ -19,6 +19,7 @@ import pandas as pd
 MODEL_DIR = Path(__file__).resolve().parent / "models"
 XT_MODEL_PATH = MODEL_DIR / "xt_markov_wsl_16x12.json"
 VAEP_MODEL_PATH = MODEL_DIR / "vaep_wsl.pkl"
+VAEP_XGB_PATH = MODEL_DIR / "vaep_xgb.pkl"
 
 SPADL_FIELD_LENGTH = 105.0
 SPADL_FIELD_WIDTH = 68.0
@@ -58,7 +59,7 @@ TYPE_MAP: dict[tuple[str, str], str] = {
     ("defensive", "ball-recovery"): "pass",
 }
 
-_vaep_import_error: str | None = None
+_vaep_error: str | None = None
 
 
 @dataclass(frozen=True)
@@ -199,47 +200,59 @@ def load_xt_markov_model() -> MarkovXtGrid:
 
 
 @functools.lru_cache(maxsize=1)
-def _try_load_vaep_model():
-    global _vaep_import_error
+def _try_load_vaep_runtime():
+    global _vaep_error
+    try:
+        from vaep_standalone import load_vaep_runtime
+
+        runtime = load_vaep_runtime()
+        if runtime is not None:
+            return runtime
+    except Exception as exc:  # noqa: BLE001
+        _vaep_error = f"VAEP standalone falhou: {exc}"
+        return None
+
+    if not VAEP_XGB_PATH.exists() and not VAEP_MODEL_PATH.exists():
+        _vaep_error = f"Modelo VAEP não encontrado em {MODEL_DIR}."
+        return None
+
+    # Legacy fallback: socceraction pickle (Python 3.11/3.12 only)
     if not VAEP_MODEL_PATH.exists():
-        _vaep_import_error = f"Modelo VAEP não encontrado em {VAEP_MODEL_PATH}."
+        _vaep_error = f"Bundle VAEP ausente ({VAEP_XGB_PATH.name})."
         return None
     try:
-        import socceraction.vaep.base  # noqa: F401 — register VAEP class for pickle
+        import socceraction.vaep.base  # noqa: F401
     except Exception as exc:  # noqa: BLE001
-        _vaep_import_error = (
-            f"socceraction indisponível ({exc}). "
-            "Use Python 3.11/3.12 e instale requirements-train.txt para VAEP."
+        _vaep_error = (
+            f"VAEP indisponível ({exc}). "
+            f"Inclua {VAEP_XGB_PATH.name} no repositório."
         )
         return None
     try:
         with open(VAEP_MODEL_PATH, "rb") as handle:
             return pickle.load(handle)
     except Exception as exc:  # noqa: BLE001
-        _vaep_import_error = str(exc)
+        _vaep_error = str(exc)
         return None
 
 
 @functools.lru_cache(maxsize=1)
 def load_vaep_model():
-    model = _try_load_vaep_model()
+    model = _try_load_vaep_runtime()
     if model is None:
-        msg = _vaep_import_error or "VAEP indisponível neste ambiente."
+        msg = _vaep_error or "VAEP indisponível neste ambiente."
         raise RuntimeError(msg)
     return model
 
 
 def vaep_available() -> bool:
-    return _try_load_vaep_model() is not None
+    return _try_load_vaep_runtime() is not None
 
 
 def vaep_status_message() -> str | None:
     if vaep_available():
         return None
-    return _vaep_import_error or (
-        "VAEP indisponível. Use Python 3.11/3.12 com socceraction instalado "
-        "(veja requirements-train.txt) ou treine localmente."
-    )
+    return _vaep_error or "VAEP indisponível."
 
 
 def rate_match_xt(spadl: pd.DataFrame, xt_model: MarkovXtGrid) -> pd.Series:
@@ -253,6 +266,8 @@ def rate_match_vaep(game: pd.Series, spadl: pd.DataFrame, vaep_model) -> pd.Seri
     if spadl.empty:
         return pd.Series(dtype=float)
     rated = vaep_model.rate(game, spadl)
+    if isinstance(rated, pd.Series):
+        return rated
     return rated["vaep_value"]
 
 
@@ -266,7 +281,7 @@ def apply_external_models(df: pd.DataFrame) -> pd.DataFrame:
         return out
 
     xt_model = load_xt_markov_model()
-    vaep_model = _try_load_vaep_model()
+    vaep_model = _try_load_vaep_runtime()
 
     if "match" not in out.columns:
         groups = [("all", out)]

@@ -5,7 +5,6 @@ from __future__ import annotations
 import pickle
 from pathlib import Path
 
-import pandas as pd
 from statsbombpy import sb
 from socceraction.spadl.statsbomb import convert_to_actions
 from socceraction.spadl.utils import add_names
@@ -54,6 +53,18 @@ def main() -> None:
     with open(vaep_path, "wb") as handle:
         pickle.dump(vaep, handle)
     print(f"Saved {vaep_path} · {len(actions):,} actions")
+
+    xgb_path = MODEL_DIR / "vaep_xgb.pkl"
+    with open(xgb_path, "wb") as handle:
+        pickle.dump(
+            {
+                "nb_prev_actions": int(vaep.nb_prev_actions),
+                "feature_columns": list(vaep._VAEP__models["scores"].feature_names_in_),  # noqa: SLF001
+                "models": vaep._VAEP__models,  # noqa: SLF001
+            },
+            handle,
+        )
+    print(f"Saved {xgb_path} · standalone bundle")
 
 
 if __name__ == "__main__":
