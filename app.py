@@ -60,7 +60,7 @@ ARROW_HEADLENGTH = 1.15
 ARROW_ALPHA = 0.68
 ARROW_ALPHA_EMPH = 0.82
 ALL_MATCHES_LABEL = "All Matches"
-DATA_CACHE_VERSION = 17
+DATA_CACHE_VERSION = 18
 XT_ZONE_COLS = 3
 XT_ZONE_ROWS = 2
 NX_XT = 16
@@ -127,6 +127,7 @@ CARD_TITLE_TEXT = "14px"
 CARD_LABEL_TEXT = "16px"
 CARD_INNER_BORDER = "rgba(107,114,128,0.45)"
 TOP_DELTAXT_N = 10
+IMPACT_PASS_MIN_GOAL_APPROACH = 5.0
 EXCLUDED_CSV = {"enzo.csv"}
 
 PLAYERS = [
@@ -163,6 +164,18 @@ def wyscout_to_statsbomb(x: float, y: float, *, flip_x: bool = False) -> tuple[f
 
 def distance_to_goal(x: float, y: float) -> float:
     return float(np.sqrt((GOAL_X - x) ** 2 + (GOAL_Y - y) ** 2))
+
+
+def pass_approaches_goal(
+    x_start: float,
+    y_start: float,
+    x_end: float,
+    y_end: float,
+    *,
+    min_meters: float = IMPACT_PASS_MIN_GOAL_APPROACH,
+) -> bool:
+    progress = distance_to_goal(x_start, y_start) - distance_to_goal(x_end, y_end)
+    return progress >= min_meters
 
 
 def is_progressive_wyscout(x_start: float, y_start: float, x_end: float, y_end: float) -> bool:
@@ -624,6 +637,24 @@ def is_high_impact_attempt(row, cols: dict[str, str] | None = None) -> bool:
     )
 
 
+def is_impact_pass_attempt(row, cols: dict[str, str] | None = None) -> bool:
+    cols = cols or _xt_column_set("v31")
+    if not row.has_end:
+        return False
+    if not pass_approaches_goal(row.x_start, row.y_start, row.x_end, row.y_end):
+        return False
+    return is_impact_attempt(row, cols)
+
+
+def is_high_impact_pass_attempt(row, cols: dict[str, str] | None = None) -> bool:
+    cols = cols or _xt_column_set("v31")
+    if not row.has_end:
+        return False
+    if not pass_approaches_goal(row.x_start, row.y_start, row.x_end, row.y_end):
+        return False
+    return is_high_impact_attempt(row, cols)
+
+
 def classification_accuracy(df: pd.DataFrame, success_col: str, attempt_fn) -> dict:
     attempts = df.apply(attempt_fn, axis=1)
     successful = int(df[success_col].astype(bool).sum())
@@ -695,8 +726,8 @@ def enrich_with_xt_v3(df: pd.DataFrame) -> pd.DataFrame:
             row.is_won
             and is_progressive_wyscout(row.x_start, row.y_start, row.x_end, row.y_end)
         )
-        out.at[idx, "impact_pass"] = bool(row.is_won and is_impact_attempt(row, cols_v31))
-        out.at[idx, "high_impact_pass"] = bool(row.is_won and is_high_impact_attempt(row, cols_v31))
+        out.at[idx, "impact_pass"] = bool(row.is_won and is_impact_pass_attempt(row, cols_v31))
+        out.at[idx, "high_impact_pass"] = bool(row.is_won and is_high_impact_pass_attempt(row, cols_v31))
 
     carry_mask = out["category"] == "ball-carries"
     for idx, row in out.loc[carry_mask].iterrows():
@@ -942,13 +973,13 @@ def compute_player_stats(df: pd.DataFrame) -> dict:
     )
     impact_pass = classification_accuracy_fn(
         passes,
-        lambda r: is_impact_attempt(r, cols),
-        lambda r: bool(r.is_won and is_impact_attempt(r, cols)),
+        lambda r: is_impact_pass_attempt(r, cols),
+        lambda r: bool(r.is_won and is_impact_pass_attempt(r, cols)),
     )
     high_impact_pass = classification_accuracy_fn(
         passes,
-        lambda r: is_high_impact_attempt(r, cols),
-        lambda r: bool(r.is_won and is_high_impact_attempt(r, cols)),
+        lambda r: is_high_impact_pass_attempt(r, cols),
+        lambda r: bool(r.is_won and is_high_impact_pass_attempt(r, cols)),
     )
     impact_carry = classification_accuracy_fn(
         carries,
@@ -990,7 +1021,7 @@ def compute_player_stats(df: pd.DataFrame) -> dict:
     )
     prog_success = passes[prog_success_mask]
     impact_success_mask = passes.apply(
-        lambda r: bool(r.is_won and is_impact_attempt(r, cols)), axis=1
+        lambda r: bool(r.is_won and is_impact_pass_attempt(r, cols)), axis=1
     )
     impact_success = passes[impact_success_mask]
 
@@ -1217,28 +1248,19 @@ def _delicate_arrows(
 
 
 def filter_impact_plays(df: pd.DataFrame) -> pd.DataFrame:
-    """Keep passes/carries classified as impact attempts (xT v3.1)."""
+    """Keep successful impact passes and carries only."""
     if df.empty:
         return df
-    cols = _xt_column_set("v31")
-    mask = df.apply(
-        lambda r: (
-            r["category"] in ("passes", "ball-carries")
-            and r["has_end"]
-            and is_impact_attempt(r, cols)
-        ),
-        axis=1,
+    mask = df["has_end"] & (
+        ((df["category"] == "passes") & df["impact_pass"])
+        | ((df["category"] == "ball-carries") & df["impact_carry"])
     )
     return df[mask].copy()
 
 
 def draw_impact_plays_map(df: pd.DataFrame, player_name: str, match_label: str):
-    """Passes and carries that qualify as impact attempts (xT v3.1)."""
-    cols = _xt_column_set("v31")
-    actions = df[
-        df["category"].isin(["passes", "ball-carries"]) & df["has_end"]
-    ].copy()
-    actions = actions[actions.apply(lambda r: is_impact_attempt(r, cols), axis=1)]
+    """Successful impact passes (≥5 m ao gol + xT v3.1) and impact carries."""
+    actions = filter_impact_plays(df)
 
     fig, ax, pitch = _base_pitch()
     scale = _map_scale()
@@ -1251,11 +1273,10 @@ def draw_impact_plays_map(df: pd.DataFrame, player_name: str, match_label: str):
     else:
         for _, row in actions.iterrows():
             is_pass = row["category"] == "passes"
-            is_lost = is_pass and not row["is_success"]
-            is_high = is_high_impact_attempt(row, cols)
-            if is_lost:
-                color, alpha = COLOR_FAIL, ARROW_ALPHA_EMPH
-            elif is_high:
+            is_high = bool(
+                row.get("high_impact_pass", False) if is_pass else row.get("high_impact_carry", False)
+            )
+            if is_high:
                 color, alpha = COLOR_HIGHLY_PROGRESSIVE, ARROW_ALPHA_EMPH
             else:
                 color, alpha = COLOR_PROGRESSIVE, ARROW_ALPHA_EMPH
@@ -1281,8 +1302,7 @@ def draw_impact_plays_map(df: pd.DataFrame, player_name: str, match_label: str):
     legend_handles = [
         Line2D([0], [0], color=COLOR_PROGRESSIVE, lw=1.4 * scale, label="Impact", alpha=0.80),
         Line2D([0], [0], color=COLOR_HIGHLY_PROGRESSIVE, lw=1.4 * scale, label="High Impact", alpha=0.85),
-        Line2D([0], [0], color=COLOR_FAIL, lw=1.4 * scale, label="Impact incompleto (passe)", alpha=0.80),
-        Line2D([0], [0], marker="o", color="w", markerfacecolor=COLOR_PROGRESSIVE, markersize=4, linestyle="None", label="Passe"),
+        Line2D([0], [0], marker="o", color="w", markerfacecolor=COLOR_PROGRESSIVE, markersize=4, linestyle="None", label="Passe certo"),
         Line2D([0], [0], marker="s", color="w", markerfacecolor=COLOR_PROGRESSIVE, markersize=4, linestyle="None", label="Condução"),
     ]
     _add_map_legend(ax, legend_handles)
@@ -1297,8 +1317,7 @@ def draw_impact_plays_map(df: pd.DataFrame, player_name: str, match_label: str):
 def draw_pass_map(df: pd.DataFrame, player_name: str, match_label: str, *, impact_only: bool = False):
     passes = df[df["category"] == "passes"].copy()
     if impact_only:
-        cols = _xt_column_set("v31")
-        passes = passes[passes.apply(lambda r: is_impact_attempt(r, cols), axis=1)]
+        passes = passes[passes["impact_pass"].astype(bool)]
     fig, ax, pitch = _base_pitch()
     scale = _map_scale()
 
@@ -1347,8 +1366,7 @@ def draw_pass_map(df: pd.DataFrame, player_name: str, match_label: str, *, impac
 def draw_carry_map(df: pd.DataFrame, player_name: str, match_label: str, *, impact_only: bool = False):
     carries = df[df["category"] == "ball-carries"].copy()
     if impact_only:
-        cols = _xt_column_set("v31")
-        carries = carries[carries.apply(lambda r: is_impact_attempt(r, cols), axis=1)]
+        carries = carries[carries["impact_carry"].astype(bool)]
     fig, ax, pitch = _base_pitch()
     scale = _map_scale()
 
@@ -1802,7 +1820,7 @@ with st.sidebar:
     impact_plays_only = st.checkbox(
         "Apenas impact plays nos mapas",
         value=False,
-        help="Mostra um mapa unificado só com passes e conduções classificados como impact (xT v3.1).",
+        help="Mostra um mapa unificado só com passes certos de impacto (≥5 m ao gol + xT v3.1) e conduções de impacto.",
     )
     st.caption("xT v3.1 · Progressivos Wyscout · Stats gerais")
 
