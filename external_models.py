@@ -1,15 +1,9 @@
-"""External possession-value models: xT Markov and VAEP.
-
-Markov xT and VAEP inference run without socceraction so the app works on
-Streamlit Cloud (Python 3.14). Training still uses socceraction — see
-scripts/train_external_models.py and scripts/export_vaep_bundle.py.
-"""
+"""External xT Markov model (no socceraction at runtime)."""
 
 from __future__ import annotations
 
 import functools
 import json
-import pickle
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -18,8 +12,6 @@ import pandas as pd
 
 MODEL_DIR = Path(__file__).resolve().parent / "models"
 XT_MODEL_PATH = MODEL_DIR / "xt_markov_wsl_16x12.json"
-VAEP_MODEL_PATH = MODEL_DIR / "vaep_wsl.pkl"
-VAEP_XGB_PATH = MODEL_DIR / "vaep_xgb.pkl"
 
 SPADL_FIELD_LENGTH = 105.0
 SPADL_FIELD_WIDTH = 68.0
@@ -59,12 +51,15 @@ TYPE_MAP: dict[tuple[str, str], str] = {
     ("defensive", "ball-recovery"): "pass",
 }
 
-_vaep_error: str | None = None
+
+def _align_markov_grid(raw: np.ndarray) -> np.ndarray:
+    """Flip socceraction export to StatsBomb: attack → +x, y=0 at bottom row."""
+    return raw[::-1, ::-1].copy()
 
 
 @dataclass(frozen=True)
 class MarkovXtGrid:
-    """Pre-trained xT surface (socceraction-compatible JSON export)."""
+    """Pre-trained xT surface aligned to StatsBomb coordinates."""
 
     xT: np.ndarray
 
@@ -77,7 +72,7 @@ class MarkovXtGrid:
         return int(self.xT.shape[0])
 
     def rate(self, spadl: pd.DataFrame) -> np.ndarray:
-        """Rate SPADL actions with ΔxT (no interpolation — same as socceraction default)."""
+        """Rate SPADL actions with ΔxT."""
         ratings = np.full(len(spadl), np.nan, dtype=float)
         if spadl.empty:
             return ratings
@@ -90,8 +85,8 @@ class MarkovXtGrid:
         startxc, startyc = _cell_indexes(move_actions["start_x"], move_actions["start_y"], self.l, self.w)
         endxc, endyc = _cell_indexes(move_actions["end_x"], move_actions["end_y"], self.l, self.w)
 
-        xT_start = self.xT[self.w - 1 - startyc, startxc]
-        xT_end = self.xT[self.w - 1 - endyc, endxc]
+        xT_start = self.xT[startyc, startxc]
+        xT_end = self.xT[endyc, endxc]
         ratings[move_actions.index.to_numpy()] = xT_end - xT_start
         return ratings
 
@@ -195,64 +190,8 @@ def load_xt_markov_model() -> MarkovXtGrid:
             "Execute o script de treino ou inclua o arquivo no diretório models/."
         )
     with open(XT_MODEL_PATH, encoding="utf-8") as handle:
-        grid = np.array(json.load(handle), dtype=float)
+        grid = _align_markov_grid(np.array(json.load(handle), dtype=float))
     return MarkovXtGrid(xT=grid)
-
-
-@functools.lru_cache(maxsize=1)
-def _try_load_vaep_runtime():
-    global _vaep_error
-    try:
-        from vaep_standalone import load_vaep_runtime
-
-        runtime = load_vaep_runtime()
-        if runtime is not None:
-            return runtime
-    except Exception as exc:  # noqa: BLE001
-        _vaep_error = f"VAEP standalone falhou: {exc}"
-        return None
-
-    if not VAEP_XGB_PATH.exists() and not VAEP_MODEL_PATH.exists():
-        _vaep_error = f"Modelo VAEP não encontrado em {MODEL_DIR}."
-        return None
-
-    # Legacy fallback: socceraction pickle (Python 3.11/3.12 only)
-    if not VAEP_MODEL_PATH.exists():
-        _vaep_error = f"Bundle VAEP ausente ({VAEP_XGB_PATH.name})."
-        return None
-    try:
-        import socceraction.vaep.base  # noqa: F401
-    except Exception as exc:  # noqa: BLE001
-        _vaep_error = (
-            f"VAEP indisponível ({exc}). "
-            f"Inclua {VAEP_XGB_PATH.name} no repositório."
-        )
-        return None
-    try:
-        with open(VAEP_MODEL_PATH, "rb") as handle:
-            return pickle.load(handle)
-    except Exception as exc:  # noqa: BLE001
-        _vaep_error = str(exc)
-        return None
-
-
-@functools.lru_cache(maxsize=1)
-def load_vaep_model():
-    model = _try_load_vaep_runtime()
-    if model is None:
-        msg = _vaep_error or "VAEP indisponível neste ambiente."
-        raise RuntimeError(msg)
-    return model
-
-
-def vaep_available() -> bool:
-    return _try_load_vaep_runtime() is not None
-
-
-def vaep_status_message() -> str | None:
-    if vaep_available():
-        return None
-    return _vaep_error or "VAEP indisponível."
 
 
 def rate_match_xt(spadl: pd.DataFrame, xt_model: MarkovXtGrid) -> pd.Series:
@@ -262,26 +201,15 @@ def rate_match_xt(spadl: pd.DataFrame, xt_model: MarkovXtGrid) -> pd.Series:
     return pd.Series(ratings, index=spadl.index, dtype=float)
 
 
-def rate_match_vaep(game: pd.Series, spadl: pd.DataFrame, vaep_model) -> pd.Series:
-    if spadl.empty:
-        return pd.Series(dtype=float)
-    rated = vaep_model.rate(game, spadl)
-    if isinstance(rated, pd.Series):
-        return rated
-    return rated["vaep_value"]
-
-
 def apply_external_models(df: pd.DataFrame) -> pd.DataFrame:
-    """Add delta_xt_markov and vaep_value columns to a player dataframe."""
+    """Add delta_xt_markov column to a player dataframe."""
     out = df.copy()
     out["delta_xt_markov"] = np.nan
-    out["vaep_value"] = np.nan
 
     if df.empty:
         return out
 
     xt_model = load_xt_markov_model()
-    vaep_model = _try_load_vaep_runtime()
 
     if "match" not in out.columns:
         groups = [("all", out)]
@@ -289,16 +217,11 @@ def apply_external_models(df: pd.DataFrame) -> pd.DataFrame:
         groups = list(out.groupby("match", sort=False))
 
     for match_name, match_df in groups:
-        game, spadl = match_df_to_spadl(match_df)
+        _game, spadl = match_df_to_spadl(match_df)
         if spadl.empty:
             continue
 
         xt_vals = rate_match_xt(spadl, xt_model)
-        vaep_vals = (
-            rate_match_vaep(game, spadl, vaep_model)
-            if vaep_model is not None
-            else pd.Series(np.nan, index=spadl.index, dtype=float)
-        )
         row_ids = spadl["_original_row_id"].astype(int).tolist()
 
         for i, rid in enumerate(row_ids):
@@ -310,12 +233,10 @@ def apply_external_models(df: pd.DataFrame) -> pd.DataFrame:
                 continue
             idx = out.index[mask][0]
             out.at[idx, "delta_xt_markov"] = float(xt_vals.iloc[i])
-            if vaep_model is not None:
-                out.at[idx, "vaep_value"] = float(vaep_vals.iloc[i])
 
     return out
 
 
 def markov_grid_for_display(xt_model: MarkovXtGrid) -> np.ndarray:
-    """Return 12×16 grid aligned with app NX_XT/NY_XT orientation."""
+    """Return 12×16 grid aligned with app pitch orientation."""
     return xt_model.xT.copy()

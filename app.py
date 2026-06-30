@@ -14,13 +14,8 @@ from matplotlib.colors import LinearSegmentedColormap, Normalize
 from mplsoccer import Pitch
 from PIL import Image
 
-from external_models import (
-    apply_external_models,
-    load_xt_markov_model,
-    markov_grid_for_display,
-    vaep_available,
-    vaep_status_message,
-)
+from external_models import apply_external_models, load_xt_markov_model, markov_grid_for_display
+from scipy.interpolate import RegularGridInterpolator
 
 # ── PAGE CONFIG ────────────────────────────────────────────────
 st.set_page_config(layout="wide", page_title="WC Player Analysis — Top ΔxT")
@@ -68,7 +63,7 @@ ARROW_HEADLENGTH = 1.15
 ARROW_ALPHA = 0.68
 ARROW_ALPHA_EMPH = 0.82
 ALL_MATCHES_LABEL = "All Matches"
-DATA_CACHE_VERSION = 22
+DATA_CACHE_VERSION = 23
 XT_ZONE_COLS = 3
 XT_ZONE_ROWS = 2
 NX_XT = 16
@@ -130,6 +125,19 @@ XT_V31_COL_SMOOTH_KERNEL = (0.22, 0.56, 0.22)
 XT_V31_MAX_COL_STEP_DEF = 0.050
 XT_V31_MAX_COL_STEP_ATT = 0.078
 XT_V31_ATT_COL_START = 10
+
+# xT Heurístico v3.2 — mescla v3.1 + Markov (magnitude baixa, bônus no terço final)
+XT_MODEL_HEURISTIC_V32 = "heuristic_v32"
+XT_V32_MAGNITUDE_FACTOR = 0.90
+XT_V32_FINAL_THIRD_RAMP_X = FINAL_THIRD_LINE_X
+XT_V32_FINAL_THIRD_MARKOV_BLEND = 0.58
+XT_V32_SURFACE_MAX = 0.36
+XT_V32_GAUSS_SIGMA_X = 3.0
+XT_V32_GAUSS_SIGMA_Y = 0.0
+XT_V32_COL_SMOOTH_KERNEL = (0.22, 0.56, 0.22)
+XT_V32_MAX_COL_STEP_DEF = 0.014
+XT_V32_MAX_COL_STEP_ATT = 0.022
+XT_V32_ATT_COL_START = 10
 
 CARD_TITLE_TEXT = "14px"
 CARD_LABEL_TEXT = "16px"
@@ -536,6 +544,75 @@ def compute_heuristic_v31_xt_grid(n_x: int = NX_XT, n_y: int = NY_XT) -> np.ndar
     return _sample_display_grid(fine, n_x, n_y, post_process=_post)
 
 
+@st.cache_data(show_spinner=False)
+def compute_markov_fine_grid(
+    nx: int = XT_V3_FINE_NX, ny: int = XT_V3_FINE_NY,
+) -> np.ndarray:
+    """Upsample aligned Markov grid to the fine heuristic mesh."""
+    grid = load_xt_markov_model().xT
+    y_coords = np.linspace(0.0, FIELD_Y, grid.shape[0])
+    x_coords = np.linspace(0.0, FIELD_X, grid.shape[1])
+    interp = RegularGridInterpolator(
+        (y_coords, x_coords), grid, bounds_error=False, fill_value=0.0
+    )
+    xe = np.linspace(0.0, FIELD_X, nx)
+    ye = np.linspace(0.0, FIELD_Y, ny)
+    Xc, Yc = np.meshgrid(xe, ye)
+    pts = np.column_stack([Yc.ravel(), Xc.ravel()])
+    return interp(pts).reshape(ny, nx)
+
+
+def _build_heuristic_v32_threat_surface(Xc: np.ndarray, Yc: np.ndarray) -> np.ndarray:
+    """v3.1 growth profile at Markov magnitude + Markov bonus in the final third."""
+    v31 = _build_heuristic_v31_threat_surface(Xc, Yc)
+    markov = compute_markov_fine_grid(Xc.shape[1], Xc.shape[0])
+
+    v31_peak = max(float(v31.max()), 1e-9)
+    markov_peak = max(float(markov.max()), 1e-9)
+    v31_shape = v31 / v31_peak
+    base = v31_shape * markov_peak * XT_V32_MAGNITUDE_FACTOR
+
+    ramp = np.clip(
+        (Xc - XT_V32_FINAL_THIRD_RAMP_X) / max(FIELD_X - XT_V32_FINAL_THIRD_RAMP_X, 1.0),
+        0.0,
+        1.0,
+    )
+    blend = _smootherstep(ramp) * XT_V32_FINAL_THIRD_MARKOV_BLEND
+    surface = base * (1.0 - blend) + markov * blend
+    surface = np.clip(surface, 0.0, XT_V32_SURFACE_MAX)
+    smoothed = _gaussian_smooth_2d(surface, XT_V32_GAUSS_SIGMA_X, XT_V32_GAUSS_SIGMA_Y)
+    return np.clip(smoothed, 0.0, XT_V32_SURFACE_MAX)
+
+
+@st.cache_data(show_spinner=False)
+def compute_heuristic_v32_fine_grid(
+    nx: int = XT_V3_FINE_NX, ny: int = XT_V3_FINE_NY,
+) -> np.ndarray:
+    xe = np.linspace(0.0, FIELD_X, nx)
+    ye = np.linspace(0.0, FIELD_Y, ny)
+    Xc, Yc = np.meshgrid(xe, ye)
+    return _build_heuristic_v32_threat_surface(Xc, Yc)
+
+
+@st.cache_data(show_spinner=False)
+def compute_heuristic_v32_xt_grid(n_x: int = NX_XT, n_y: int = NY_XT) -> np.ndarray:
+    fine = compute_heuristic_v32_fine_grid()
+
+    def _post(grid: np.ndarray) -> np.ndarray:
+        smoothed = np.array([
+            _smooth_columns_1d(grid[iy], XT_V32_COL_SMOOTH_KERNEL)
+            for iy in range(grid.shape[0])
+        ])
+        return _limit_adjacent_column_step(
+            smoothed,
+            XT_V32_MAX_COL_STEP_DEF,
+            att_col_start=XT_V32_ATT_COL_START,
+            max_step_att=XT_V32_MAX_COL_STEP_ATT,
+        )
+
+    return _sample_display_grid(fine, n_x, n_y, post_process=_post)
+
+
 def _adjust_heuristic_v3_variant_pass_delta(row, start_col: str, end_col: str) -> float:
     if not row.is_won:
         return 0.0
@@ -580,6 +657,10 @@ def apply_heuristic_v31_xt(df: pd.DataFrame) -> pd.DataFrame:
     return _apply_heuristic_v3_variant_xt(df, compute_heuristic_v31_fine_grid, "v31")
 
 
+def apply_heuristic_v32_xt(df: pd.DataFrame) -> pd.DataFrame:
+    return _apply_heuristic_v3_variant_xt(df, compute_heuristic_v32_fine_grid, "v32")
+
+
 def _max_adjacent_col_jump_pct(grid: np.ndarray) -> float:
     if grid.shape[1] < 2:
         return 0.0
@@ -617,6 +698,8 @@ def _row_if_won(row):
 def _xt_column_set(variant: str = "v3") -> dict[str, str]:
     if variant == "v31":
         return {"start": "xt_start_v31", "end": "xt_end_v31", "delta": "delta_xt_v31"}
+    if variant == "v32":
+        return {"start": "xt_start_v32", "end": "xt_end_v32", "delta": "delta_xt_v32"}
     return {"start": "xt_start", "end": "xt_end", "delta": "delta_xt"}
 
 
@@ -711,6 +794,7 @@ def enrich_with_xt_v3(df: pd.DataFrame) -> pd.DataFrame:
     for col in (
         "xt_start", "xt_end", "delta_xt",
         "xt_start_v31", "xt_end_v31", "delta_xt_v31",
+        "xt_start_v32", "xt_end_v32", "delta_xt_v32",
     ):
         out[col] = 0.0
     out["progressive"] = False
@@ -731,6 +815,11 @@ def enrich_with_xt_v3(df: pd.DataFrame) -> pd.DataFrame:
     xt_df_v31 = apply_heuristic_v31_xt(out.loc[xt_mask].copy())
     out.loc[xt_mask, ["xt_start_v31", "xt_end_v31", "delta_xt_v31"]] = xt_df_v31[
         ["xt_start_v31", "xt_end_v31", "delta_xt_v31"]
+    ].values
+
+    xt_df_v32 = apply_heuristic_v32_xt(out.loc[xt_mask].copy())
+    out.loc[xt_mask, ["xt_start_v32", "xt_end_v32", "delta_xt_v32"]] = xt_df_v32[
+        ["xt_start_v32", "xt_end_v32", "delta_xt_v32"]
     ].values
 
     pass_mask = out["category"] == "passes"
@@ -761,6 +850,7 @@ def ensure_xt_model_columns(df: pd.DataFrame) -> pd.DataFrame:
 
     variant_specs = [
         ("v31", apply_heuristic_v31_xt),
+        ("v32", apply_heuristic_v32_xt),
     ]
     for prefix, apply_fn in variant_specs:
         delta_col = f"delta_xt_{prefix}"
@@ -773,12 +863,11 @@ def ensure_xt_model_columns(df: pd.DataFrame) -> pd.DataFrame:
                     [f"xt_start_{prefix}", f"xt_end_{prefix}", delta_col]
                 ].values
 
-    if "delta_xt_markov" not in out.columns or "vaep_value" not in out.columns:
+    if "delta_xt_markov" not in out.columns:
         try:
             out = apply_external_models(out)
         except FileNotFoundError:
             out["delta_xt_markov"] = np.nan
-            out["vaep_value"] = np.nan
 
     return out
 
@@ -855,7 +944,6 @@ def load_player_all_matches(code: str, name: str, base_dir: Path | None = None) 
         combined = apply_external_models(combined)
     except FileNotFoundError:
         combined["delta_xt_markov"] = np.nan
-        combined["vaep_value"] = np.nan
     return combined
 
 
@@ -1821,83 +1909,66 @@ def _model_correlation(df: pd.DataFrame, col_a: str, col_b: str) -> float | None
 def _render_external_model_comparison(
     player_data: dict[str, pd.DataFrame], match_selection: str
 ) -> None:
-    """Compare heuristic v3.1 with xT Markov and VAEP (StatsBomb Open Data)."""
+    """Compare heuristic v3.1, v3.2 and xT Markov."""
     match_label = _match_scope_label(match_selection)
 
-    if not any(
+    markov_ok = any(
         "delta_xt_markov" in df.columns and df["delta_xt_markov"].notna().any()
         for df in player_data.values()
-    ):
-        st.markdown("---")
-        st.info(
-            "Modelos externos (xT Markov + VAEP) indisponíveis. "
-            "Inclua os arquivos em `models/` e recarregue a página."
-        )
-        return
+    )
 
-    external_models = [
+    compare_models = [
         {
             "key": "v3.1",
             "label": "Heurístico v3.1",
             "delta_col": "delta_xt_v31",
-            "desc": "Grid interno com transições suaves e penalização lateral no ataque.",
+            "grid_fn": compute_heuristic_v31_xt_grid,
+            "desc": "Transições suaves · magnitude alta · penalização lateral no ataque.",
         },
         {
-            "key": "Markov",
-            "label": "xT Markov",
-            "delta_col": "delta_xt_markov",
-            "desc": "Grid 16×12 treinado em FA WSL 2018/19 (StatsBomb Open Data).",
+            "key": "v3.2",
+            "label": "Heurístico v3.2",
+            "delta_col": "delta_xt_v32",
+            "grid_fn": compute_heuristic_v32_xt_grid,
+            "desc": (
+                "Mescla v3.1 + Markov: magnitude baixa como Markov, crescimento suave como v3.1, "
+                f"bônus Markov no terço final (x≥{int(FINAL_THIRD_LINE_X)} m)."
+            ),
         },
     ]
-    if vaep_available():
-        external_models.append(
+    if markov_ok:
+        compare_models.append(
             {
-                "key": "VAEP",
-                "label": "VAEP",
-                "delta_col": "vaep_value",
-                "desc": "Valor de ação por ML (XGBoost) — mesma base WSL 2018/19. Sequência sintética por jogador/partida.",
+                "key": "Markov",
+                "label": "xT Markov",
+                "delta_col": "delta_xt_markov",
+                "grid_fn": lambda: markov_grid_for_display(load_xt_markov_model()),
+                "desc": "Grid 16×12 treinado em FA WSL 2018/19 (StatsBomb Open Data).",
             }
         )
 
     st.markdown("---")
-    section_title = "### v3.1 · xT Markov" + (" · VAEP" if vaep_available() else "")
-    st.markdown(section_title)
+    st.markdown("### v3.1 · v3.2 · xT Markov")
     st.caption(
-        "Comparação exploratória: Markov"
-        + (" e VAEP" if vaep_available() else "")
-        + " foram treinados na **FA WSL 2018/19** (StatsBomb Open Data) "
-        "e aplicados aos CSVs Wyscout do Brasil."
-        + (
-            " VAEP usa sequência sintética por jogador/partida (sem timestamps reais)."
-            if vaep_available()
-            else ""
-        )
+        "O **v3.2** combina o perfil de crescimento do v3.1 com a escala do Markov. "
+        "No terço final, as zonas recebem bônus alinhados ao grid Markov (WSL 2018/19)."
     )
-    vaep_msg = vaep_status_message()
-    if vaep_msg:
-        st.warning(f"VAEP não carregado: {vaep_msg}")
+
+    if not markov_ok:
+        st.info("Grid Markov indisponível — inclua `models/xt_markov_wsl_16x12.json`.")
 
     try:
-        markov_grid = markov_grid_for_display(load_xt_markov_model())
-        v31_grid = compute_heuristic_v31_xt_grid()
-        grid_cols = st.columns(2)
-        with grid_cols[0]:
-            st.markdown('<div class="map-label">Heurístico v3.1</div>', unsafe_allow_html=True)
-            img, fig = draw_xt_grid_map(v31_grid, "v3.1", as_percent=True)
-            plt.close(fig)
-            st.image(img, use_container_width=True)
-            st.caption(
-                f"16×12 · Máx: {v31_grid.max():.3f} · Média: {v31_grid.mean():.3f}"
-            )
-        with grid_cols[1]:
-            st.markdown('<div class="map-label">xT Markov (WSL)</div>', unsafe_allow_html=True)
-            img, fig = draw_xt_grid_map(markov_grid, "Markov", as_percent=True)
-            plt.close(fig)
-            st.image(img, use_container_width=True)
-            st.caption(
-                f"16×12 · Máx: {markov_grid.max():.3f} · Média: {markov_grid.mean():.3f} · "
-                "grid JSON pré-treinado (WSL 2018/19)"
-            )
+        grid_cols = st.columns(len(compare_models))
+        for col, model in zip(grid_cols, compare_models):
+            grid = model["grid_fn"]()
+            with col:
+                st.markdown(f'<div class="map-label">{model["label"]}</div>', unsafe_allow_html=True)
+                img, fig = draw_xt_grid_map(grid, model["key"], as_percent=True)
+                plt.close(fig)
+                st.image(img, use_container_width=True)
+                st.caption(
+                    f"16×12 · Máx: {grid.max():.3f} · Média: {grid.mean():.3f}"
+                )
     except FileNotFoundError as exc:
         st.warning(str(exc))
 
@@ -1914,28 +1985,27 @@ def _render_external_model_comparison(
 
         xt_actions = df[_xt_action_mask(df)]
         row: dict = {"Jogador": player["name"]}
-        for model in external_models:
+        for model in compare_models:
             row[f"Σ {model['key']}"] = round(_safe_col_sum(xt_actions, model["delta_col"]), 3)
             rated = xt_actions[model["delta_col"]].dropna()
             row[f"Média {model['key']}"] = round(float(rated.mean()), 4) if not rated.empty else None
         summary_rows.append(row)
 
         corr_row = {"Jogador": player["name"]}
-        corr_pairs = [("delta_xt_v31", "delta_xt_markov", "v3.1 × Markov")]
-        if vaep_available():
-            corr_pairs.extend(
-                [
-                    ("delta_xt_v31", "vaep_value", "v3.1 × VAEP"),
-                    ("delta_xt_markov", "vaep_value", "Markov × VAEP"),
-                ]
-            )
+        corr_pairs = [
+            ("delta_xt_v31", "delta_xt_v32", "v3.1 × v3.2"),
+            ("delta_xt_v32", "delta_xt_markov", "v3.2 × Markov"),
+            ("delta_xt_v31", "delta_xt_markov", "v3.1 × Markov"),
+        ]
         for col_a, col_b, label in corr_pairs:
+            if col_a not in xt_actions.columns or col_b not in xt_actions.columns:
+                continue
             corr = _model_correlation(xt_actions, col_a, col_b)
             corr_row[label] = round(corr, 3) if corr is not None else None
         corr_rows.append(corr_row)
 
-        cmp_cols = st.columns(len(external_models))
-        for col, model in zip(cmp_cols, external_models):
+        cmp_cols = st.columns(len(compare_models))
+        for col, model in zip(cmp_cols, compare_models):
             with col:
                 st.markdown(
                     f'<div class="map-label">Top · {model["key"]}</div>',
@@ -1954,7 +2024,7 @@ def _render_external_model_comparison(
 
     if summary_rows:
         st.markdown("---")
-        st.markdown("### Resumo v3.1 / Markov / VAEP")
+        st.markdown("### Resumo v3.1 / v3.2 / Markov")
         st.dataframe(pd.DataFrame(summary_rows), use_container_width=True, hide_index=True)
 
     if corr_rows:
@@ -2009,7 +2079,7 @@ with st.sidebar:
             "e conduções de impacto."
         ),
     )
-    st.caption("xT v3.1 · Markov · VAEP · Progressivos Wyscout · Stats gerais")
+    st.caption("xT v3.1 · v3.2 · Markov · Progressivos Wyscout · Stats gerais")
 
 tab_analysis, tab_stats, tab_compare = st.tabs(
     ["Análise", "Stats", "Comparar modelos"]
