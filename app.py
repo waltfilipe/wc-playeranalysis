@@ -63,7 +63,7 @@ ARROW_HEADLENGTH = 1.15
 ARROW_ALPHA = 0.68
 ARROW_ALPHA_EMPH = 0.82
 ALL_GAMES_LABEL = "todos os jogos"
-DATA_CACHE_VERSION = 28
+DATA_CACHE_VERSION = 29
 XT_ZONE_COLS = 3
 XT_ZONE_ROWS = 2
 NX_XT = 16
@@ -147,7 +147,7 @@ XT_V32_ATT_COL_START = 10
 XT_PRIMARY_VARIANT = "v32"
 XT_V32_SCALE = XT_V32_SURFACE_MAX / XT_V3_SURFACE_MAX
 # Limiares de impacto: escala pelo pico da grade v3.2 vs v3.1 (~0.157/0.889)
-XT_V32_CLASS_SCALE = 0.15
+XT_V32_CLASS_SCALE = 0.172
 XT_V32_PROG_FLOOR_CLASS = XT_V3_PROG_FLOOR_CLASS * XT_V32_CLASS_SCALE
 XT_V32_HIGH_FLOOR_CLASS = XT_V3_HIGH_FLOOR_CLASS * XT_V32_CLASS_SCALE
 XT_V32_PROG_SCALE_CLASS = XT_V3_PROG_SCALE_CLASS * XT_V32_CLASS_SCALE
@@ -1115,8 +1115,13 @@ def compute_player_stats(df: pd.DataFrame) -> dict:
             "sum_xt_end_passes": 0.0,
             "sum_xt_end_final_third": 0.0,
             "sum_xt_end_long_balls": 0.0,
+            "sum_xt_end_top10_passes": 0.0,
+            "sum_xt_end_key_passes": 0.0,
+            "sum_xt_end_impact_passes": 0.0,
             "pos_pct": 0.0,
             "xt_per_pass": 0.0,
+            "dxt_per_pass": 0.0,
+            "xt_per_pass_final_third": 0.0,
             "xt_per_prog_pass": 0.0,
             "xt_per_impact_pass": 0.0,
             "xt_per_long_ball": 0.0,
@@ -1184,6 +1189,31 @@ def compute_player_stats(df: pd.DataFrame) -> dict:
     )
     impact_success = passes[impact_success_mask]
 
+    completed_ft = completed_passes[completed_passes["x_end"] >= FINAL_THIRD_LINE_X]
+    sum_xt_end_passes_final_third = (
+        float(completed_ft[end_col].sum()) if not completed_ft.empty else 0.0
+    )
+
+    positive_completed = completed_passes[
+        completed_passes["has_end"] & (completed_passes[delta_col] > 0)
+    ]
+    top10_passes = (
+        positive_completed.nlargest(TOP_DELTAXT_N, delta_col)
+        if not positive_completed.empty
+        else completed_passes.iloc[0:0]
+    )
+    sum_xt_end_top10_passes = (
+        float(top10_passes[end_col].sum()) if not top10_passes.empty else 0.0
+    )
+
+    key_passes_completed = completed_passes[completed_passes["is_key_pass"]]
+    sum_xt_end_key_passes = (
+        float(key_passes_completed[end_col].sum()) if not key_passes_completed.empty else 0.0
+    )
+    sum_xt_end_impact_passes = (
+        float(impact_success[end_col].sum()) if not impact_success.empty else 0.0
+    )
+
     return {
         **general,
         "accuracy_pct": accuracy,
@@ -1198,10 +1228,15 @@ def compute_player_stats(df: pd.DataFrame) -> dict:
         "sum_xt_end_passes": sum_xt_end_passes,
         "sum_xt_end_final_third": sum_xt_end_final_third,
         "sum_xt_end_long_balls": sum_xt_end_long_balls,
+        "sum_xt_end_top10_passes": sum_xt_end_top10_passes,
+        "sum_xt_end_key_passes": sum_xt_end_key_passes,
+        "sum_xt_end_impact_passes": sum_xt_end_impact_passes,
         "pos_pct": pos_pct,
         "xt_per_pass": _safe_ratio(sum_xt_end_passes, len(completed_passes)),
+        "dxt_per_pass": _safe_ratio(sum_dxt_passes, len(completed_passes)),
+        "xt_per_pass_final_third": _safe_ratio(sum_xt_end_passes_final_third, len(completed_ft)),
         "xt_per_prog_pass": _safe_ratio(float(prog_success[delta_col].sum()), len(prog_success)),
-        "xt_per_impact_pass": _safe_ratio(float(impact_success[delta_col].sum()), len(impact_success)),
+        "xt_per_impact_pass": _safe_ratio(sum_xt_end_impact_passes, len(impact_success)),
         "xt_per_long_ball": _safe_ratio(sum_xt_end_long_balls, len(completed_long_balls)),
         "by_action_type": df.groupby("action_type").size().to_dict(),
     }
@@ -1317,10 +1352,15 @@ def render_xt_efficiency_card(stats: dict, tone: str) -> None:
         "Eficiência xT (v3.2)",
         tone,
         [
-            ("xT / passe", _fmt_decimal(stats["xt_per_pass"], decimals=3)),
-            ("xT / passe prog.", _fmt_decimal(stats["xt_per_prog_pass"], decimals=3)),
-            ("xT / impact passe", _fmt_decimal(stats["xt_per_impact_pass"], decimals=3)),
-            ("xT / bola longa", _fmt_decimal(stats["xt_per_long_ball"], decimals=3)),
+            ("Σ xT / passe completado", _fmt_decimal(stats["xt_per_pass"], decimals=3)),
+            ("Σ ΔxT / passe completado", _fmt_decimal(stats["dxt_per_pass"], decimals=3)),
+            (
+                "Σ xT terço final / passe compl. terço final",
+                _fmt_decimal(stats["xt_per_pass_final_third"], decimals=3),
+            ),
+            ("Σ xT top 10 passes", _fmt_decimal(stats["sum_xt_end_top10_passes"])),
+            ("Σ xT key passes", _fmt_decimal(stats["sum_xt_end_key_passes"])),
+            ("Σ xT / impact passe", _fmt_decimal(stats["xt_per_impact_pass"], decimals=3)),
         ],
     )
 
