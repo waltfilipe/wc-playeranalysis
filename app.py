@@ -14,6 +14,8 @@ from matplotlib.colors import LinearSegmentedColormap, Normalize
 from mplsoccer import Pitch
 from PIL import Image
 
+from external_models import apply_external_models, load_xt_markov_model, markov_grid_for_display
+
 # ── PAGE CONFIG ────────────────────────────────────────────────
 st.set_page_config(layout="wide", page_title="WC Player Analysis — Top ΔxT")
 
@@ -60,7 +62,7 @@ ARROW_HEADLENGTH = 1.15
 ARROW_ALPHA = 0.68
 ARROW_ALPHA_EMPH = 0.82
 ALL_MATCHES_LABEL = "All Matches"
-DATA_CACHE_VERSION = 19
+DATA_CACHE_VERSION = 20
 XT_ZONE_COLS = 3
 XT_ZONE_ROWS = 2
 NX_XT = 16
@@ -765,6 +767,13 @@ def ensure_xt_model_columns(df: pd.DataFrame) -> pd.DataFrame:
                     [f"xt_start_{prefix}", f"xt_end_{prefix}", delta_col]
                 ].values
 
+    if "delta_xt_markov" not in out.columns or "vaep_value" not in out.columns:
+        try:
+            out = apply_external_models(out)
+        except FileNotFoundError:
+            out["delta_xt_markov"] = np.nan
+            out["vaep_value"] = np.nan
+
     return out
 
 
@@ -836,6 +845,11 @@ def load_player_all_matches(code: str, name: str, base_dir: Path | None = None) 
 
     combined = pd.concat(frames, ignore_index=True)
     combined["player"] = name
+    try:
+        combined = apply_external_models(combined)
+    except FileNotFoundError:
+        combined["delta_xt_markov"] = np.nan
+        combined["vaep_value"] = np.nan
     return combined
 
 
@@ -1784,6 +1798,146 @@ def render_xt_model_comparison(
         st.markdown("### Resumo comparativo")
         st.dataframe(pd.DataFrame(summary_rows), use_container_width=True, hide_index=True)
 
+    _render_external_model_comparison(player_data, match_selection)
+
+
+def _xt_action_mask(df: pd.DataFrame) -> pd.Series:
+    return df["category"].isin(["passes", "ball-carries"]) & df["has_end"]
+
+
+def _model_correlation(df: pd.DataFrame, col_a: str, col_b: str) -> float | None:
+    subset = df[[col_a, col_b]].dropna()
+    if len(subset) < 3:
+        return None
+    return float(subset[col_a].corr(subset[col_b]))
+
+
+def _render_external_model_comparison(
+    player_data: dict[str, pd.DataFrame], match_selection: str
+) -> None:
+    """Compare heuristic v3.1 with xT Markov and VAEP (StatsBomb Open Data)."""
+    match_label = _match_scope_label(match_selection)
+
+    if not any(
+        "delta_xt_markov" in df.columns and df["delta_xt_markov"].notna().any()
+        for df in player_data.values()
+    ):
+        st.markdown("---")
+        st.info(
+            "Modelos externos (xT Markov + VAEP) indisponíveis. "
+            "Inclua os arquivos em `models/` e recarregue a página."
+        )
+        return
+
+    external_models = [
+        {
+            "key": "v3.1",
+            "label": "Heurístico v3.1",
+            "delta_col": "delta_xt_v31",
+            "desc": "Grid interno com transições suaves e penalização lateral no ataque.",
+        },
+        {
+            "key": "Markov",
+            "label": "xT Markov",
+            "delta_col": "delta_xt_markov",
+            "desc": "Grid 16×12 treinado em FA WSL 2018/19 (StatsBomb Open Data, socceraction).",
+        },
+        {
+            "key": "VAEP",
+            "label": "VAEP",
+            "delta_col": "vaep_value",
+            "desc": "Valor de ação por ML (XGBoost) — mesma base WSL 2018/19. Sequência sintética por jogador/partida.",
+        },
+    ]
+
+    st.markdown("---")
+    st.markdown("### v3.1 · xT Markov · VAEP")
+    st.caption(
+        "Comparação exploratória: Markov e VAEP foram treinados na **FA WSL 2018/19** "
+        "(StatsBomb Open Data) e aplicados aos CSVs Wyscout do Brasil. "
+        "VAEP usa sequência sintética por jogador/partida (sem timestamps reais)."
+    )
+
+    try:
+        markov_grid = markov_grid_for_display(load_xt_markov_model())
+        v31_grid = compute_heuristic_v31_xt_grid()
+        grid_cols = st.columns(2)
+        with grid_cols[0]:
+            st.markdown('<div class="map-label">Heurístico v3.1</div>', unsafe_allow_html=True)
+            img, fig = draw_xt_grid_map(v31_grid, "v3.1", as_percent=True)
+            plt.close(fig)
+            st.image(img, use_container_width=True)
+            st.caption(
+                f"16×12 · Máx: {v31_grid.max():.3f} · Média: {v31_grid.mean():.3f}"
+            )
+        with grid_cols[1]:
+            st.markdown('<div class="map-label">xT Markov (WSL)</div>', unsafe_allow_html=True)
+            img, fig = draw_xt_grid_map(markov_grid, "Markov", as_percent=True)
+            plt.close(fig)
+            st.image(img, use_container_width=True)
+            st.caption(
+                f"16×12 · Máx: {markov_grid.max():.3f} · Média: {markov_grid.mean():.3f} · "
+                "socceraction · interpolação desligada (compat. SciPy ≥1.14)"
+            )
+    except FileNotFoundError as exc:
+        st.warning(str(exc))
+
+    summary_rows: list[dict] = []
+    corr_rows: list[dict] = []
+
+    for player in PLAYERS:
+        df = filter_by_match(player_data[player["code"]], match_selection)
+        st.markdown(f'<div class="player-header">{player["name"]}</div>', unsafe_allow_html=True)
+
+        if df.empty:
+            st.warning(f"Sem dados para {player['name']}.")
+            continue
+
+        xt_actions = df[_xt_action_mask(df)]
+        row: dict = {"Jogador": player["name"]}
+        for model in external_models:
+            row[f"Σ {model['key']}"] = round(_safe_col_sum(xt_actions, model["delta_col"]), 3)
+            rated = xt_actions[model["delta_col"]].dropna()
+            row[f"Média {model['key']}"] = round(float(rated.mean()), 4) if not rated.empty else None
+        summary_rows.append(row)
+
+        corr_row = {"Jogador": player["name"]}
+        for col_a, col_b, label in (
+            ("delta_xt_v31", "delta_xt_markov", "v3.1 × Markov"),
+            ("delta_xt_v31", "vaep_value", "v3.1 × VAEP"),
+            ("delta_xt_markov", "vaep_value", "Markov × VAEP"),
+        ):
+            corr = _model_correlation(xt_actions, col_a, col_b)
+            corr_row[label] = round(corr, 3) if corr is not None else None
+        corr_rows.append(corr_row)
+
+        cmp_cols = st.columns(3)
+        for col, model in zip(cmp_cols, external_models):
+            with col:
+                st.markdown(
+                    f'<div class="map-label">Top · {model["key"]}</div>',
+                    unsafe_allow_html=True,
+                )
+                _show_map(
+                    lambda d, n, m, mc=model["delta_col"], ml=model["key"]: draw_top_deltaxt_map(
+                        d, n, m, delta_col=mc, model_label=ml
+                    ),
+                    df,
+                    player["name"],
+                    match_label,
+                    f"Sem ações com valor positivo ({model['key']}).",
+                )
+                st.caption(model["desc"])
+
+    if summary_rows:
+        st.markdown("---")
+        st.markdown("### Resumo v3.1 / Markov / VAEP")
+        st.dataframe(pd.DataFrame(summary_rows), use_container_width=True, hide_index=True)
+
+    if corr_rows:
+        st.markdown("### Correlação (passes + conduções)")
+        st.dataframe(pd.DataFrame(corr_rows), use_container_width=True, hide_index=True)
+
 
 # ── MAIN ─────────────────────────────────────────────────────
 st.markdown(
@@ -1832,9 +1986,11 @@ with st.sidebar:
             "e conduções de impacto."
         ),
     )
-    st.caption("xT v3.1 · Progressivos Wyscout · Stats gerais")
+    st.caption("xT v3.1 · Markov · VAEP · Progressivos Wyscout · Stats gerais")
 
-tab_analysis, tab_stats, tab_compare = st.tabs(["Análise", "Stats", "Comparar xT v3 / v3.1"])
+tab_analysis, tab_stats, tab_compare = st.tabs(
+    ["Análise", "Stats", "Comparar modelos"]
+)
 
 with tab_analysis:
     render_comparison(player_data, selected_match, impact_plays_only=impact_plays_only)
