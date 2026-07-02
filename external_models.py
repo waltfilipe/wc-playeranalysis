@@ -76,8 +76,7 @@ MARKOV_MODEL_SPECS: dict[str, dict[str, Any]] = {
         "filename": "xt_markov_top5_16x12.json",
         "label": "Markov Top5",
         "delta_col": "delta_xt_markov_top5",
-        "description": "La Liga + Premier League + Serie A + UCL · ataque invertido para LTR.",
-        "flip_attack_x": True,
+        "description": "La Liga + Premier League + Serie A + UCL · orientação LTR (ataque → +x).",
     },
     "bayesian": {
         "filename": "xt_markov_bayesian_16x12.json",
@@ -91,12 +90,14 @@ VALIDATION_REPORT_PATH = MODEL_DIR / "xt_validation_report.json"
 LEGACY_XT_MODEL_PATH = MODEL_DIR / "xt_markov_wsl_16x12.json"
 
 
-def _align_markov_grid(raw: np.ndarray, *, flip_attack_x: bool = False) -> np.ndarray:
-    """Flip socceraction export to StatsBomb coords; optional x-mirror for LTR attack."""
-    grid = raw[::-1, ::-1].copy()
-    if flip_attack_x:
-        grid = grid[:, ::-1]
-    return grid
+def _align_markov_grid(raw: np.ndarray) -> np.ndarray:
+    """Intermediate socceraction → StatsBomb transform used when training models."""
+    return raw[::-1, ::-1].copy()
+
+
+def _markov_grid_from_saved(raw: np.ndarray) -> np.ndarray:
+    """Load grids saved by train_external_models (already LTR: attack toward +x)."""
+    return np.array(raw, dtype=float)
 
 
 def _extract_grid_payload(data: Any) -> tuple[np.ndarray, dict[str, Any]]:
@@ -269,8 +270,7 @@ def load_markov_model(model_key: str = "wsl") -> MarkovXtGrid:
         )
     with open(path, encoding="utf-8") as handle:
         raw_grid, meta = _extract_grid_payload(json.load(handle))
-    flip_attack_x = bool(spec.get("flip_attack_x", False))
-    grid = _align_markov_grid(raw_grid, flip_attack_x=flip_attack_x)
+    grid = _markov_grid_from_saved(raw_grid)
     return MarkovXtGrid(xT=grid, model_key=model_key, metadata=meta or None)
 
 
