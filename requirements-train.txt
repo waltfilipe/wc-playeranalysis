@@ -4,3 +4,4 @@ socceraction==1.5.3
 statsbombpy
 pandera==0.17.2
 multimethod==1.9
+scikit-learn>=1.3
