@@ -23,6 +23,7 @@ from external_models import (
     load_validation_report,
     load_xt_markov_model,
     markov_grid_for_display,
+    markov_models_status,
 )
 from scipy.interpolate import RegularGridInterpolator
 
@@ -2269,51 +2270,68 @@ def _shared_markov_color_scale(grids: dict[str, np.ndarray]) -> tuple[float, flo
 
 def render_markov_fields_comparison() -> None:
     """Side-by-side pitch grids for all four Markov xT models."""
-    available = [k for k in MARKOV_FIELD_ORDER if k in list_available_markov_models()]
-    if not available:
-        st.info(
-            "Nenhum grid Markov disponível. Execute "
-            "`python scripts/train_external_models.py`."
-        )
-        return
+    status_rows = markov_models_status()
+    available = [row["key"] for row in status_rows if row["present"]]
+    missing = [row for row in status_rows if not row["present"]]
 
     st.markdown("### Campos Markov — comparação 16×12")
     st.caption(
-        "Mesma escala de cor (p5–p95 global) nos quatro modelos para comparar "
-        "zonas quentes e frias sem distorção."
+        "Quatro variantes treinadas em StatsBomb Open Data · escala de cor compartilhada "
+        "(p5–p95) quando todos os arquivos estão em `models/`."
     )
 
-    ref_rows = []
-    grids: dict[str, np.ndarray] = {}
-    for key in available:
-        spec = MARKOV_MODEL_SPECS[key]
-        grid = markov_grid_for_display(key)
-        grids[key] = grid
-        meta = load_markov_model(key).metadata or {}
-        ref_rows.append(
+    ref_table = []
+    for row in status_rows:
+        ref_table.append(
             {
-                "Chave": key,
-                "Modelo": spec["label"],
-                "Base de dados": spec["description"],
-                "Coluna ΔxT": spec["delta_col"],
-                "Máx xT": round(float(grid.max()), 4),
-                "Média xT": round(float(grid.mean()), 4),
-                "Jogos treino": meta.get("n_games_train"),
+                "Chave": row["key"],
+                "Modelo": row["label"],
+                "Base de dados": row["description"],
+                "Coluna ΔxT": row["delta_col"],
+                "Arquivo": row["filename"],
+                "Status": "OK" if row["present"] else "Ausente",
+                "Máx xT": round(row["max_xt"], 4) if row.get("max_xt") is not None else None,
+                "Média xT": round(row["mean_xt"], 4) if row.get("mean_xt") is not None else None,
+                "Jogos treino": row.get("n_games_train"),
             }
         )
-    st.dataframe(pd.DataFrame(ref_rows), use_container_width=True, hide_index=True)
+    st.dataframe(pd.DataFrame(ref_table), use_container_width=True, hide_index=True)
+
+    if missing:
+        st.warning(
+            f"**{len(missing)} de {len(status_rows)} grids ausentes** em `models/`. "
+            "Só o WSL aparece se os outros JSONs não foram commitados ou o deploy não os incluiu. "
+            "Para gerar todos: `pip install -r requirements-train.txt && "
+            "python scripts/train_external_models.py`"
+        )
+        for row in missing:
+            st.error(f"`{row['filename']}` não encontrado · esperado em `{row['path']}`")
+
+    if not available:
+        st.info("Nenhum grid Markov carregável.")
+        return
+
+    grids: dict[str, np.ndarray] = {}
+    for key in available:
+        grids[key] = markov_grid_for_display(key)
 
     vmin, vmax = _shared_markov_color_scale(grids)
     st.caption(f"Escala compartilhada: {vmin * 100:.2f}% – {vmax * 100:.2f}% (valores xT no grid)")
 
-    for row_start in range(0, len(available), 2):
-        row_keys = available[row_start : row_start + 2]
-        cols = st.columns(len(row_keys))
+    for row_start in range(0, len(MARKOV_FIELD_ORDER), 2):
+        row_keys = MARKOV_FIELD_ORDER[row_start : row_start + 2]
+        cols = st.columns(2)
         for col, key in zip(cols, row_keys):
             spec = MARKOV_MODEL_SPECS[key]
-            grid = grids[key]
             with col:
                 st.markdown(f'<div class="map-label">{spec["label"]}</div>', unsafe_allow_html=True)
+                if key not in grids:
+                    st.warning(
+                        f"Grid ausente — inclua `{spec['filename']}` em `models/` "
+                        f"ou execute o script de treino."
+                    )
+                    continue
+                grid = grids[key]
                 img, fig = draw_xt_grid_map(
                     grid,
                     spec["label"],
@@ -2328,15 +2346,23 @@ def render_markov_fields_comparison() -> None:
 
     with st.expander("Superfície contínua (interpolação no campo)"):
         st.caption("Upsample 96×64 · escala 0 – máx global · colormap magma.")
-        surf_vmax = max(float(g.max()) for g in grids.values())
-        surf_cols = st.columns(len(available))
-        for col, key in zip(surf_cols, available):
-            spec = MARKOV_MODEL_SPECS[key]
-            with col:
-                fine = compute_markov_fine_grid(model_key=key)
-                img, fig = draw_xt_threat_surface(fine, spec["label"], surf_vmax)
-                plt.close(fig)
-                st.image(img, use_container_width=True)
+        if not grids:
+            st.info("Nenhuma superfície disponível.")
+        else:
+            surf_vmax = max(float(g.max()) for g in grids.values())
+            for row_start in range(0, len(MARKOV_FIELD_ORDER), 2):
+                row_keys = MARKOV_FIELD_ORDER[row_start : row_start + 2]
+                surf_cols = st.columns(2)
+                for col, key in zip(surf_cols, row_keys):
+                    spec = MARKOV_MODEL_SPECS[key]
+                    with col:
+                        if key not in grids:
+                            st.warning(f"`{spec['filename']}` ausente.")
+                            continue
+                        fine = compute_markov_fine_grid(model_key=key)
+                        img, fig = draw_xt_threat_surface(fine, spec["label"], surf_vmax)
+                        plt.close(fig)
+                        st.image(img, use_container_width=True)
 
 
 def _all_xt_test_models() -> list[dict]:

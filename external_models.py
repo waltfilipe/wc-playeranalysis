@@ -277,9 +277,44 @@ def load_xt_markov_model() -> MarkovXtGrid:
 def list_available_markov_models() -> list[str]:
     return [
         key
-        for key, spec in MARKOV_MODEL_SPECS.items()
-        if (MODEL_DIR / spec["filename"]).exists()
+        for key in MARKOV_MODEL_SPECS
+        if (MODEL_DIR / MARKOV_MODEL_SPECS[key]["filename"]).exists()
     ]
+
+
+def markov_model_path(model_key: str) -> Path:
+    spec = MARKOV_MODEL_SPECS[model_key]
+    return MODEL_DIR / spec["filename"]
+
+
+def markov_models_status() -> list[dict[str, Any]]:
+    """Status of every expected Markov grid (present or missing on disk)."""
+    rows: list[dict[str, Any]] = []
+    for key in MARKOV_MODEL_SPECS:
+        spec = MARKOV_MODEL_SPECS[key]
+        path = markov_model_path(key)
+        present = path.exists()
+        row: dict[str, Any] = {
+            "key": key,
+            "label": spec["label"],
+            "description": spec["description"],
+            "delta_col": spec["delta_col"],
+            "filename": spec["filename"],
+            "path": str(path),
+            "present": present,
+        }
+        if present:
+            try:
+                model = load_markov_model(key)
+                row["max_xt"] = float(model.xT.max())
+                row["mean_xt"] = float(model.xT.mean())
+                meta = model.metadata or {}
+                row["n_games_train"] = meta.get("n_games_train")
+            except Exception as exc:  # noqa: BLE001
+                row["present"] = False
+                row["error"] = str(exc)
+        rows.append(row)
+    return rows
 
 
 def load_validation_report() -> dict[str, Any]:
