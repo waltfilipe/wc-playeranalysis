@@ -1,4 +1,5 @@
 from io import BytesIO
+import json
 from pathlib import Path
 
 import matplotlib
@@ -187,15 +188,16 @@ CARD_INNER_BORDER = "rgba(107,114,128,0.45)"
 TOP_DELTAXT_N = 10
 IMPACT_PASS_MIN_GOAL_APPROACH_FINAL_THIRD = 5.0
 IMPACT_PASS_MIN_GOAL_APPROACH_REST = 10.0
+TOP5_PLAYER_STATS_PATH = Path(__file__).resolve().parent / "models" / "top5_player_stats_v4.json"
 EXCLUDED_CSV = {"enzo.csv"}
 CSV_X_FLIP_MATCHES = frozenset({"Uruguay"})
 
 PLAYERS = [
-    {"code": "BG", "name": "Bruno Guimarães", "tone": "#5b9bd5", "glob": "BG-vs *.csv"},
-    {"code": "CS", "name": "Casemiro", "tone": "#e67e22", "glob": "CS-vs *.csv"},
-    {"code": "LP", "name": "Lucas Paquetá", "tone": "#22c55e", "glob": "LP-vs *.csv"},
-    {"code": "PD", "name": "Pedri", "tone": "#9333ea", "glob": "Pedri-vs *.csv"},
-    {"code": "RD", "name": "Rodri", "tone": "#dc2626", "glob": "Rodri-vs *.csv"},
+    {"code": "BG", "name": "Bruno Guimarães", "position": "CM", "tone": "#5b9bd5", "glob": "BG-vs *.csv"},
+    {"code": "CS", "name": "Casemiro", "position": "DM", "tone": "#e67e22", "glob": "CS-vs *.csv"},
+    {"code": "LP", "name": "Lucas Paquetá", "position": "AM", "tone": "#22c55e", "glob": "LP-vs *.csv"},
+    {"code": "PD", "name": "Pedri", "position": "CM", "tone": "#9333ea", "glob": "Pedri-vs *.csv"},
+    {"code": "RD", "name": "Rodri", "position": "DM", "tone": "#dc2626", "glob": "Rodri-vs *.csv"},
 ]
 
 CMAP_PASS = LinearSegmentedColormap.from_list(
@@ -1352,12 +1354,12 @@ def _is_prog_wyscout_row(row) -> bool:
 
 
 # ── STATS ────────────────────────────────────────────────────
-def compute_player_stats(df: pd.DataFrame) -> dict:
-    """Player stats using heuristic xT v3.2 (primary model)."""
+def compute_player_stats(df: pd.DataFrame, variant: str | None = None) -> dict:
+    """Player stats for a heuristic xT variant (default: primary model)."""
     passes = df[df["category"] == "passes"]
     carries = df[df["category"] == "ball-carries"]
     empty_cls = {"successful": 0, "attempted": 0, "accuracy_pct": 0.0}
-    cols = _primary_xt_cols()
+    cols = _xt_column_set(variant or XT_PRIMARY_VARIANT)
     delta_col, end_col = cols["delta"], cols["end"]
 
     total_passes = len(passes)
@@ -1526,6 +1528,91 @@ def compute_player_stats(df: pd.DataFrame) -> dict:
         "xt_per_long_ball": _safe_ratio(sum_xt_end_long_balls, len(completed_long_balls)),
         "by_action_type": df.groupby("action_type").size().to_dict(),
     }
+
+
+def _wc_v4_player_summary(df: pd.DataFrame, player: dict) -> dict:
+    """Compact v4 benchmark row for one WC player."""
+    stats = compute_player_stats(df, variant="v4")
+    xt_actions = df[_xt_action_mask(df)]
+    delta = pd.to_numeric(xt_actions.get("delta_xt_v4"), errors="coerce").fillna(0.0)
+    pos_pct = float((delta > 0).mean() * 100.0) if len(delta) else 0.0
+    return {
+        "Jogador": player["name"],
+        "Posição": player.get("position", "—"),
+        "Σ ΔxT": round(stats["sum_dxt_passes"] + stats["sum_dxt_carries"], 3),
+        "Σ xT passe": round(stats["sum_xt_end_passes"], 3),
+        "ΔxT/passe": round(stats["dxt_per_pass"], 4),
+        "xT/passe": round(stats["xt_per_pass"], 4),
+        "Passes": stats["passes_completed"],
+        "% ΔxT+": round(pos_pct, 1),
+    }
+
+
+@st.cache_data(show_spinner=False)
+def load_top5_player_stats_v4() -> dict:
+    if not TOP5_PLAYER_STATS_PATH.exists():
+        return {"metadata": {}, "players": []}
+    with open(TOP5_PLAYER_STATS_PATH, encoding="utf-8") as handle:
+        return json.load(handle)
+
+
+def render_v4_player_benchmarks(player_data: dict[str, pd.DataFrame]) -> None:
+    """WC squad and Top5 league player tables under heuristic v4."""
+    st.markdown("### Jogadores · Heurístico v4")
+    st.caption(
+        "Métricas com o **heurístico v4** (v3.1 + bônus Top5 no último terço). "
+        "A seleção usa os CSVs Wyscout da Copa; o benchmark Top5 usa StatsBomb Open Data."
+    )
+
+    wc_rows = []
+    for player in PLAYERS:
+        df = player_data[player["code"]]
+        if df.empty:
+            continue
+        wc_rows.append(_wc_v4_player_summary(df, player))
+    if wc_rows:
+        st.markdown("#### Seleção Brasileira · Copa do Mundo")
+        wc_df = pd.DataFrame(wc_rows).sort_values("Σ ΔxT", ascending=False)
+        st.dataframe(wc_df, use_container_width=True, hide_index=True)
+
+    top5_payload = load_top5_player_stats_v4()
+    top5_players = top5_payload.get("players", [])
+    meta = top5_payload.get("metadata", {})
+    if top5_players:
+        st.markdown("#### Top 5 ligas · maiores Σ ΔxT (heurístico v4)")
+        st.caption(
+            f"Pool: {', '.join(meta.get('competitions', []))} · "
+            f"{meta.get('n_games', '—')} jogos · mín. {meta.get('min_passes', '—')} passes · "
+            f"{meta.get('note', '')}"
+        )
+        top5_df = pd.DataFrame(top5_players).rename(
+            columns={
+                "player_name": "Jogador",
+                "position": "Posição",
+                "sum_delta_xt": "Σ ΔxT",
+                "sum_xt_end_passes": "Σ xT passe",
+                "dxt_per_pass": "ΔxT/passe",
+                "xt_per_pass": "xT/passe",
+                "passes": "Passes",
+            }
+        )
+        show_cols = [
+            "Jogador", "Posição", "Σ ΔxT", "Σ xT passe", "ΔxT/passe", "xT/passe", "Passes"
+        ]
+        st.dataframe(top5_df[show_cols], use_container_width=True, hide_index=True)
+
+        st.markdown("#### Top 5 ligas · maiores xT por passe")
+        st.dataframe(
+            top5_df.sort_values("xT/passe", ascending=False)[show_cols].head(15),
+            use_container_width=True,
+            hide_index=True,
+        )
+    else:
+        st.info(
+            "Benchmark Top5 ainda não gerado. Execute "
+            "`python scripts/build_top5_player_stats.py` para criar "
+            f"`{TOP5_PLAYER_STATS_PATH.name}`."
+        )
 
 
 def _item_sep(idx: int, total: int) -> str:
@@ -2647,6 +2734,8 @@ def render_xt_tests_tab(player_data: dict[str, pd.DataFrame]) -> None:
     render_markov_fields_comparison()
     st.markdown("---")
 
+    render_v4_player_benchmarks(player_data)
+    st.markdown("---")
     st.markdown("### Grids heurísticos (v3.2 · v3.3 · v4 · v4.1)")
     heuristic_models = _heuristic_test_models()
     hcols = st.columns(len(heuristic_models))
