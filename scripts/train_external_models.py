@@ -130,6 +130,11 @@ def aligned_grid_from_model(xt: ExpectedThreat) -> np.ndarray:
     return _align_markov_grid(np.array(xt.xT, dtype=float))
 
 
+def saved_grid_from_model(xt: ExpectedThreat) -> np.ndarray:
+    """StatsBomb LTR grid as written to JSON (attack toward +x)."""
+    return aligned_grid_from_model(xt)[::-1, ::-1]
+
+
 def cell_counts(actions: pd.DataFrame) -> np.ndarray:
     moves = get_successful_move_actions(actions.reset_index(drop=True))
     counts = np.zeros((GRID_W, GRID_L), dtype=float)
@@ -309,7 +314,7 @@ def main() -> None:
     ):
         print(f"Training Markov '{key}'…")
         xt = train_markov(train_df)
-        grid = aligned_grid_from_model(xt)
+        grid = saved_grid_from_model(xt)
         trained_grids[key] = grid
         train_sizes[key] = int(len(train_df))
         meta = {
@@ -320,7 +325,7 @@ def main() -> None:
             "max_xt": float(grid.max()),
         }
         out_path = MODEL_DIR / MARKOV_MODEL_SPECS[key]["filename"]
-        save_markov_model(out_path, grid[::-1, ::-1], model_key=key, metadata=meta)
+        save_markov_model(out_path, grid, model_key=key, metadata=meta)
         print(f"  Saved {out_path} · max xT={grid.max():.4f}")
 
     print("Training Markov 'bayesian'…")
@@ -342,7 +347,7 @@ def main() -> None:
         "max_xt": float(bayes_grid.max()),
     }
     bayes_path = MODEL_DIR / MARKOV_MODEL_SPECS["bayesian"]["filename"]
-    save_markov_model(bayes_path, bayes_grid[::-1, ::-1], model_key="bayesian", metadata=bayes_meta)
+    save_markov_model(bayes_path, bayes_grid, model_key="bayesian", metadata=bayes_meta)
     print(f"  Saved {bayes_path} · max xT={bayes_grid.max():.4f}")
 
     print("=== Hold-out validation (shot em 8 ações) ===")

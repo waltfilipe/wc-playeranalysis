@@ -1,0 +1,99 @@
+"""Batch heuristic xT scoring helpers (StatsBomb / SPADL coordinates)."""
+
+from __future__ import annotations
+
+import numpy as np
+
+SB_FIELD_X = 120.0
+SB_FIELD_Y = 80.0
+SPADL_FIELD_LENGTH = 105.0
+SPADL_FIELD_WIDTH = 68.0
+
+MOVE_TYPE_NAMES = frozenset({"pass", "cross", "dribble"})
+
+
+def spadl_to_statsbomb(x: np.ndarray, y: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    x_sb = np.clip(x * SB_FIELD_X / SPADL_FIELD_LENGTH, 0.0, SB_FIELD_X)
+    y_sb = np.clip(y * SB_FIELD_Y / SPADL_FIELD_WIDTH, 0.0, SB_FIELD_Y)
+    return x_sb, y_sb
+
+
+def xt_bilinear_batch(x: np.ndarray, y: np.ndarray, fine_grid: np.ndarray) -> np.ndarray:
+    """Sample threat surface at StatsBomb coordinates (vectorized)."""
+    ny, nx = fine_grid.shape
+    fx = np.clip(x / SB_FIELD_X * (nx - 1), 0.0, nx - 1)
+    fy = np.clip(y / SB_FIELD_Y * (ny - 1), 0.0, ny - 1)
+    x0 = fx.astype(np.int64)
+    y0 = fy.astype(np.int64)
+    x1 = np.minimum(x0 + 1, nx - 1)
+    y1 = np.minimum(y0 + 1, ny - 1)
+    tx = fx - x0
+    ty = fy - y0
+    v00 = fine_grid[y0, x0]
+    v10 = fine_grid[y0, x1]
+    v01 = fine_grid[y1, x0]
+    v11 = fine_grid[y1, x1]
+    return (
+        (1.0 - tx) * (1.0 - ty) * v00
+        + tx * (1.0 - ty) * v10
+        + (1.0 - tx) * ty * v01
+        + tx * ty * v11
+    )
+
+
+def score_move_actions_raw_delta(
+    *,
+    start_x: np.ndarray,
+    start_y: np.ndarray,
+    end_x: np.ndarray,
+    end_y: np.ndarray,
+    fine_grid: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Return xt_start, xt_end, raw delta for aligned move actions."""
+    sx, sy = spadl_to_statsbomb(start_x, start_y)
+    ex, ey = spadl_to_statsbomb(end_x, end_y)
+    xt_start = xt_bilinear_batch(sx, sy, fine_grid)
+    xt_end = xt_bilinear_batch(ex, ey, fine_grid)
+    return xt_start, xt_end, xt_end - xt_start
+
+
+def shorten_position(position: str | None) -> str:
+    if not position:
+        return "—"
+    mapping = {
+        "Goalkeeper": "GK",
+        "Right Back": "RB",
+        "Left Back": "LB",
+        "Right Wing Back": "RWB",
+        "Left Wing Back": "LWB",
+        "Centre Back": "CB",
+        "Right Center Back": "RCB",
+        "Left Center Back": "LCB",
+        "Right Centre Back": "RCB",
+        "Left Centre Back": "LCB",
+        "Center Back": "CB",
+        "Centre Back": "CB",
+        "Right Midfield": "RM",
+        "Left Midfield": "LM",
+        "Right Wing": "RW",
+        "Left Wing": "LW",
+        "Center Attacking Midfield": "CAM",
+        "Centre Attacking Midfield": "CAM",
+        "Center Defensive Midfield": "CDM",
+        "Centre Defensive Midfield": "CDM",
+        "Central Defensive Midfield": "CDM",
+        "Central Midfield": "CM",
+        "Right Center Midfield": "RCM",
+        "Left Center Midfield": "LCM",
+        "Right Centre Midfield": "RCM",
+        "Left Centre Midfield": "LCM",
+        "Right Defensive Midfield": "RDM",
+        "Left Defensive Midfield": "LDM",
+        "Second Striker": "SS",
+        "Center Forward": "CF",
+        "Centre Forward": "CF",
+        "Right Center Forward": "RCF",
+        "Left Center Forward": "LCF",
+        "Striker": "ST",
+    }
+    return mapping.get(position, position)
