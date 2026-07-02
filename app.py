@@ -73,7 +73,7 @@ ARROW_HEADLENGTH = 1.15
 ARROW_ALPHA = 0.68
 ARROW_ALPHA_EMPH = 0.82
 ALL_GAMES_LABEL = "todos os jogos"
-DATA_CACHE_VERSION = 32
+DATA_CACHE_VERSION = 33
 XT_ZONE_COLS = 3
 XT_ZONE_ROWS = 2
 NX_XT = 16
@@ -156,12 +156,10 @@ XT_V32_ATT_COL_START = 10
 # xT Heurístico v3.3 — bônus Markov escolhido por validação hold-out
 XT_MODEL_HEURISTIC_V33 = "heuristic_v33"
 
-# xT Heurístico v4 — v3.1 + bônus leve e suave (Markov Top5 · LTR)
+# xT Heurístico v4 — v3.1 + pequenos bônus por quadrante (Markov Top5 · LTR)
 XT_MODEL_HEURISTIC_V4 = "heuristic_v4"
-XT_V4_MARKOV_BONUS_MAX = 0.055
-XT_V4_MARKOV_BONUS_POWER = 1.04
-XT_V4_MARKOV_BONUS_SIGMA_X = 4.5
-XT_V4_MARKOV_BONUS_SIGMA_Y = 2.5
+XT_V4_MARKOV_BONUS_MAX = 0.038
+XT_V4_MARKOV_BONUS_POWER = 1.0
 XT_V4_SURFACE_MAX = XT_V3_SURFACE_MAX
 
 # Modelo ativo para stats, impact plays e mapas de análise
@@ -615,6 +613,31 @@ def _markov_bonus_from_fine(
     return _gaussian_smooth_2d(rel * bonus_max, sigma_x, sigma_y)
 
 
+def _markov_quadrant_bonus_field(
+    nx: int,
+    ny: int,
+    model_key: str = "top5",
+    *,
+    bonus_max: float = XT_V4_MARKOV_BONUS_MAX,
+    bonus_power: float = XT_V4_MARKOV_BONUS_POWER,
+) -> np.ndarray:
+    """Small per-cell bonus from aligned Markov grid, upsampled to the fine mesh."""
+    grid = load_markov_model(model_key).xT
+    peak = max(float(grid.max()), 1e-9)
+    rel = (grid / peak) ** bonus_power
+    bonus_coarse = rel * bonus_max
+    y_coords = np.linspace(0.0, FIELD_Y, grid.shape[0])
+    x_coords = np.linspace(0.0, FIELD_X, grid.shape[1])
+    interp = RegularGridInterpolator(
+        (y_coords, x_coords), bonus_coarse, bounds_error=False, fill_value=0.0
+    )
+    xe = np.linspace(0.0, FIELD_X, nx)
+    ye = np.linspace(0.0, FIELD_Y, ny)
+    Xc, Yc = np.meshgrid(xe, ye)
+    pts = np.column_stack([Yc.ravel(), Xc.ravel()])
+    return interp(pts).reshape(ny, nx)
+
+
 def _markov_bonus_field(
     nx: int,
     ny: int,
@@ -716,16 +739,14 @@ def compute_heuristic_v33_xt_grid(n_x: int = NX_XT, n_y: int = NY_XT, _bonus_key
 
 
 def _build_heuristic_v4_threat_surface(Xc: np.ndarray, Yc: np.ndarray) -> np.ndarray:
-    """v3.1 base + light smooth Markov Top5 quadrant bonus."""
+    """v3.1 base + small Markov Top5 quadrant bonuses."""
     base = _build_heuristic_v31_threat_surface(Xc, Yc)
-    bonus = _markov_bonus_field(
+    bonus = _markov_quadrant_bonus_field(
         Xc.shape[1],
         Xc.shape[0],
         model_key="top5",
         bonus_max=XT_V4_MARKOV_BONUS_MAX,
         bonus_power=XT_V4_MARKOV_BONUS_POWER,
-        sigma_x=XT_V4_MARKOV_BONUS_SIGMA_X,
-        sigma_y=XT_V4_MARKOV_BONUS_SIGMA_Y,
     )
     return np.clip(base + bonus, 0.0, XT_V4_SURFACE_MAX)
 
@@ -2327,7 +2348,7 @@ def _heuristic_test_models() -> list[dict]:
             "label": "Heurístico v4 · Markov Top5",
             "grid_fn": compute_heuristic_v4_xt_grid,
             "delta_col": "delta_xt_v4",
-            "desc": "v3.1 + bônus leve e suave por região (Markov Top5 · LTR).",
+            "desc": "v3.1 + pequenos bônus por quadrante (Markov Top5 · LTR).",
         },
     ]
 
