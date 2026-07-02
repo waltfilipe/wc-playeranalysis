@@ -1794,6 +1794,8 @@ def draw_xt_grid_map(
     value_fmt: str = ".2f",
     n_x: int | None = None,
     n_y: int | None = None,
+    vmin: float | None = None,
+    vmax: float | None = None,
 ):
     """Pitch grid with xT value labeled in each cell (Hudson-style)."""
     grid_rows, grid_cols = grid.shape
@@ -1809,17 +1811,19 @@ def draw_xt_grid_map(
 
     x_bins = np.linspace(0, FIELD_X, cols + 1)
     y_bins = np.linspace(0, FIELD_Y, rows + 1)
-    if color_percentile is not None:
-        vmin = float(np.percentile(grid, color_percentile[0]))
-        vmax = float(np.percentile(grid, color_percentile[1]))
+    if vmin is not None and vmax is not None:
+        vmin_f, vmax_f = float(vmin), float(vmax)
+    elif color_percentile is not None:
+        vmin_f = float(np.percentile(grid, color_percentile[0]))
+        vmax_f = float(np.percentile(grid, color_percentile[1]))
     else:
-        vmin = 0.0
-        vmax = max(float(grid.max()), 1e-6)
-    if vmax <= vmin:
-        vmax = vmin + 1e-6
+        vmin_f = 0.0
+        vmax_f = max(float(grid.max()), 1e-6)
+    if vmax_f <= vmin_f:
+        vmax_f = vmin_f + 1e-6
 
-    norm = Normalize(vmin=vmin, vmax=vmax)
-    threshold = vmin + (vmax - vmin) * 0.45
+    norm = Normalize(vmin=vmin_f, vmax=vmax_f)
+    threshold = vmin_f + (vmax_f - vmin_f) * 0.45
 
     for iy in range(rows):
         for ix in range(cols):
@@ -2228,9 +2232,14 @@ def _heuristic_test_models() -> list[dict]:
     ]
 
 
+MARKOV_FIELD_ORDER = ("wsl", "womens", "top5", "bayesian")
+
+
 def _markov_test_models() -> list[dict]:
     models = []
-    for key in list_available_markov_models():
+    for key in MARKOV_FIELD_ORDER:
+        if key not in list_available_markov_models():
+            continue
         spec = MARKOV_MODEL_SPECS[key]
         models.append(
             {
@@ -2244,6 +2253,90 @@ def _markov_test_models() -> list[dict]:
             }
         )
     return models
+
+
+def _shared_markov_color_scale(grids: dict[str, np.ndarray]) -> tuple[float, float]:
+    """Common vmin/vmax (p5–p95) across Markov grids for fair visual comparison."""
+    if not grids:
+        return 0.0, 1.0
+    stacked = np.concatenate([g.ravel() for g in grids.values()])
+    vmin = float(np.percentile(stacked, 5))
+    vmax = float(np.percentile(stacked, 95))
+    if vmax <= vmin:
+        vmax = vmin + 1e-6
+    return vmin, vmax
+
+
+def render_markov_fields_comparison() -> None:
+    """Side-by-side pitch grids for all four Markov xT models."""
+    available = [k for k in MARKOV_FIELD_ORDER if k in list_available_markov_models()]
+    if not available:
+        st.info(
+            "Nenhum grid Markov disponível. Execute "
+            "`python scripts/train_external_models.py`."
+        )
+        return
+
+    st.markdown("### Campos Markov — comparação 16×12")
+    st.caption(
+        "Mesma escala de cor (p5–p95 global) nos quatro modelos para comparar "
+        "zonas quentes e frias sem distorção."
+    )
+
+    ref_rows = []
+    grids: dict[str, np.ndarray] = {}
+    for key in available:
+        spec = MARKOV_MODEL_SPECS[key]
+        grid = markov_grid_for_display(key)
+        grids[key] = grid
+        meta = load_markov_model(key).metadata or {}
+        ref_rows.append(
+            {
+                "Chave": key,
+                "Modelo": spec["label"],
+                "Base de dados": spec["description"],
+                "Coluna ΔxT": spec["delta_col"],
+                "Máx xT": round(float(grid.max()), 4),
+                "Média xT": round(float(grid.mean()), 4),
+                "Jogos treino": meta.get("n_games_train"),
+            }
+        )
+    st.dataframe(pd.DataFrame(ref_rows), use_container_width=True, hide_index=True)
+
+    vmin, vmax = _shared_markov_color_scale(grids)
+    st.caption(f"Escala compartilhada: {vmin * 100:.2f}% – {vmax * 100:.2f}% (valores xT no grid)")
+
+    for row_start in range(0, len(available), 2):
+        row_keys = available[row_start : row_start + 2]
+        cols = st.columns(len(row_keys))
+        for col, key in zip(cols, row_keys):
+            spec = MARKOV_MODEL_SPECS[key]
+            grid = grids[key]
+            with col:
+                st.markdown(f'<div class="map-label">{spec["label"]}</div>', unsafe_allow_html=True)
+                img, fig = draw_xt_grid_map(
+                    grid,
+                    spec["label"],
+                    as_percent=True,
+                    color_percentile=None,
+                    vmin=vmin,
+                    vmax=vmax,
+                )
+                plt.close(fig)
+                st.image(img, use_container_width=True)
+                st.caption(f"`{key}` · {spec['description']}")
+
+    with st.expander("Superfície contínua (interpolação no campo)"):
+        st.caption("Upsample 96×64 · escala 0 – máx global · colormap magma.")
+        surf_vmax = max(float(g.max()) for g in grids.values())
+        surf_cols = st.columns(len(available))
+        for col, key in zip(surf_cols, available):
+            spec = MARKOV_MODEL_SPECS[key]
+            with col:
+                fine = compute_markov_fine_grid(model_key=key)
+                img, fig = draw_xt_threat_surface(fine, spec["label"], surf_vmax)
+                plt.close(fig)
+                st.image(img, use_container_width=True)
 
 
 def _all_xt_test_models() -> list[dict]:
@@ -2312,21 +2405,22 @@ def render_xt_tests_tab(player_data: dict[str, pd.DataFrame]) -> None:
 
     render_xt_validation_section()
     st.markdown("---")
+    render_markov_fields_comparison()
+    st.markdown("---")
 
-    st.markdown("### Grids 16×12")
-    for start in range(0, len(test_models), 3):
-        row_models = test_models[start : start + 3]
-        grid_cols = st.columns(len(row_models))
-        for col, model in zip(grid_cols, row_models):
-            with col:
-                try:
-                    grid = model["grid_fn"]()
-                    img, fig = draw_xt_grid_map(grid, model["label"], as_percent=True)
-                    plt.close(fig)
-                    st.image(img, use_container_width=True)
-                    st.caption(f"{model['desc']} · máx {grid.max():.3f}")
-                except FileNotFoundError as exc:
-                    st.warning(str(exc))
+    st.markdown("### Grids heurísticos (v3.2 · v3.3)")
+    heuristic_models = _heuristic_test_models()
+    hcols = st.columns(len(heuristic_models))
+    for col, model in zip(hcols, heuristic_models):
+        with col:
+            try:
+                grid = model["grid_fn"]()
+                img, fig = draw_xt_grid_map(grid, model["label"], as_percent=True)
+                plt.close(fig)
+                st.image(img, use_container_width=True)
+                st.caption(f"{model['desc']} · máx {grid.max():.3f}")
+            except FileNotFoundError as exc:
+                st.warning(str(exc))
 
     st.markdown("---")
     st.markdown("### Σ ΔxT por jogador")
