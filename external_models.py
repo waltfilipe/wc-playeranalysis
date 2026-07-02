@@ -1,17 +1,20 @@
-"""External xT Markov model (no socceraction at runtime)."""
+"""External xT Markov models (no socceraction at runtime)."""
 
 from __future__ import annotations
 
 import functools
 import json
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pandas as pd
 
 MODEL_DIR = Path(__file__).resolve().parent / "models"
-XT_MODEL_PATH = MODEL_DIR / "xt_markov_wsl_16x12.json"
+GRID_L = 16
+GRID_W = 12
 
 SPADL_FIELD_LENGTH = 105.0
 SPADL_FIELD_WIDTH = 68.0
@@ -35,6 +38,11 @@ MOVE_TYPE_IDS = {
     SPADL_ACTIONTYPES.index("cross"),
     SPADL_ACTIONTYPES.index("dribble"),
 }
+SHOT_TYPE_IDS = {
+    SPADL_ACTIONTYPES.index("shot"),
+    SPADL_ACTIONTYPES.index("shot_penalty"),
+    SPADL_ACTIONTYPES.index("shot_freekick"),
+}
 RESULT_SUCCESS_ID = SPADL_RESULTS.index("success")
 BODYPART_FOOT_ID = SPADL_BODYPARTS.index("foot")
 
@@ -51,10 +59,69 @@ TYPE_MAP: dict[tuple[str, str], str] = {
     ("defensive", "ball-recovery"): "pass",
 }
 
+MARKOV_MODEL_SPECS: dict[str, dict[str, Any]] = {
+    "wsl": {
+        "filename": "xt_markov_wsl_16x12.json",
+        "label": "Markov WSL (LTR)",
+        "delta_col": "delta_xt_markov",
+        "description": "FA WSL 2018/19 · orientação corrigida (left-to-right).",
+    },
+    "womens": {
+        "filename": "xt_markov_womens_16x12.json",
+        "label": "Markov Womens",
+        "delta_col": "delta_xt_markov_womens",
+        "description": "WSL (3 temp.) + Copa do Mundo Feminina 2019.",
+    },
+    "top5": {
+        "filename": "xt_markov_top5_16x12.json",
+        "label": "Markov Top5",
+        "delta_col": "delta_xt_markov_top5",
+        "description": "La Liga + Premier League + Serie A + UCL (open data).",
+    },
+    "bayesian": {
+        "filename": "xt_markov_bayesian_16x12.json",
+        "label": "Markov Bayesiano",
+        "delta_col": "delta_xt_markov_bayesian",
+        "description": "Womens suavizado com prior WSL e contagem por célula.",
+    },
+}
+
+VALIDATION_REPORT_PATH = MODEL_DIR / "xt_validation_report.json"
+LEGACY_XT_MODEL_PATH = MODEL_DIR / "xt_markov_wsl_16x12.json"
+
 
 def _align_markov_grid(raw: np.ndarray) -> np.ndarray:
     """Flip socceraction export to StatsBomb: attack → +x, y=0 at bottom row."""
     return raw[::-1, ::-1].copy()
+
+
+def _extract_grid_payload(data: Any) -> tuple[np.ndarray, dict[str, Any]]:
+    if isinstance(data, list):
+        return np.array(data, dtype=float), {}
+    if isinstance(data, dict) and "grid" in data:
+        meta = dict(data.get("metadata", {}))
+        return np.array(data["grid"], dtype=float), meta
+    raise ValueError("Formato de modelo xT inválido.")
+
+
+def save_markov_model(
+    path: Path,
+    grid: np.ndarray,
+    *,
+    model_key: str,
+    metadata: dict[str, Any] | None = None,
+) -> None:
+    meta = {
+        "model_key": model_key,
+        "grid_shape": [int(grid.shape[0]), int(grid.shape[1])],
+        "saved_at": datetime.now(timezone.utc).isoformat(),
+    }
+    if metadata:
+        meta.update(metadata)
+    payload = {"grid": grid.tolist(), "metadata": meta}
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w", encoding="utf-8") as handle:
+        json.dump(payload, handle)
 
 
 @dataclass(frozen=True)
@@ -62,6 +129,8 @@ class MarkovXtGrid:
     """Pre-trained xT surface aligned to StatsBomb coordinates."""
 
     xT: np.ndarray
+    model_key: str = "wsl"
+    metadata: dict[str, Any] | None = None
 
     @property
     def l(self) -> int:
@@ -182,16 +251,60 @@ def match_df_to_spadl(match_df: pd.DataFrame) -> tuple[pd.Series, pd.DataFrame]:
     return game, spadl
 
 
-@functools.lru_cache(maxsize=1)
-def load_xt_markov_model() -> MarkovXtGrid:
-    if not XT_MODEL_PATH.exists():
+@functools.lru_cache(maxsize=None)
+def load_markov_model(model_key: str = "wsl") -> MarkovXtGrid:
+    spec = MARKOV_MODEL_SPECS.get(model_key)
+    if spec is None:
+        raise KeyError(f"Modelo Markov desconhecido: {model_key}")
+
+    path = MODEL_DIR / spec["filename"]
+    if not path.exists():
         raise FileNotFoundError(
-            f"Grid xT Markov não encontrado em {XT_MODEL_PATH}. "
-            "Execute o script de treino ou inclua o arquivo no diretório models/."
+            f"Grid xT Markov '{model_key}' não encontrado em {path}. "
+            "Execute scripts/train_external_models.py."
         )
-    with open(XT_MODEL_PATH, encoding="utf-8") as handle:
-        grid = _align_markov_grid(np.array(json.load(handle), dtype=float))
-    return MarkovXtGrid(xT=grid)
+    with open(path, encoding="utf-8") as handle:
+        raw_grid, meta = _extract_grid_payload(json.load(handle))
+    grid = _align_markov_grid(raw_grid)
+    return MarkovXtGrid(xT=grid, model_key=model_key, metadata=meta or None)
+
+
+def load_xt_markov_model() -> MarkovXtGrid:
+    """Backward-compatible loader for the legacy WSL Markov grid."""
+    return load_markov_model("wsl")
+
+
+def list_available_markov_models() -> list[str]:
+    return [
+        key
+        for key, spec in MARKOV_MODEL_SPECS.items()
+        if (MODEL_DIR / spec["filename"]).exists()
+    ]
+
+
+def load_validation_report() -> dict[str, Any]:
+    if not VALIDATION_REPORT_PATH.exists():
+        return {
+            "winner": "wsl",
+            "winner_reason": "validation_report_missing",
+            "v33_bonus_source": "wsl",
+            "metrics": {},
+        }
+    with open(VALIDATION_REPORT_PATH, encoding="utf-8") as handle:
+        return json.load(handle)
+
+
+def get_v33_bonus_markov_key() -> str:
+    report = load_validation_report()
+    key = str(report.get("v33_bonus_source") or report.get("winner") or "wsl")
+    if key not in MARKOV_MODEL_SPECS:
+        return "wsl"
+    if key not in list_available_markov_models():
+        for fallback in ("bayesian", "womens", "wsl"):
+            if fallback in list_available_markov_models():
+                return fallback
+        return "wsl"
+    return key
 
 
 def rate_match_xt(spadl: pd.DataFrame, xt_model: MarkovXtGrid) -> pd.Series:
@@ -202,14 +315,21 @@ def rate_match_xt(spadl: pd.DataFrame, xt_model: MarkovXtGrid) -> pd.Series:
 
 
 def apply_external_models(df: pd.DataFrame) -> pd.DataFrame:
-    """Add delta_xt_markov column to a player dataframe."""
+    """Add delta_xt_markov* columns for every available Markov model."""
     out = df.copy()
-    out["delta_xt_markov"] = np.nan
+    available = list_available_markov_models()
+    if not available:
+        out["delta_xt_markov"] = np.nan
+        return out
+
+    for key in available:
+        delta_col = MARKOV_MODEL_SPECS[key]["delta_col"]
+        out[delta_col] = np.nan
 
     if df.empty:
         return out
 
-    xt_model = load_xt_markov_model()
+    models = {key: load_markov_model(key) for key in available}
 
     if "match" not in out.columns:
         groups = [("all", out)]
@@ -221,8 +341,8 @@ def apply_external_models(df: pd.DataFrame) -> pd.DataFrame:
         if spadl.empty:
             continue
 
-        xt_vals = rate_match_xt(spadl, xt_model)
         row_ids = spadl["_original_row_id"].astype(int).tolist()
+        ratings_by_key = {key: rate_match_xt(spadl, models[key]) for key in available}
 
         for i, rid in enumerate(row_ids):
             if "match" in out.columns and match_name != "all":
@@ -232,11 +352,13 @@ def apply_external_models(df: pd.DataFrame) -> pd.DataFrame:
             if not mask.any():
                 continue
             idx = out.index[mask][0]
-            out.at[idx, "delta_xt_markov"] = float(xt_vals.iloc[i])
+            for key in available:
+                delta_col = MARKOV_MODEL_SPECS[key]["delta_col"]
+                out.at[idx, delta_col] = float(ratings_by_key[key].iloc[i])
 
     return out
 
 
-def markov_grid_for_display(xt_model: MarkovXtGrid) -> np.ndarray:
+def markov_grid_for_display(model_key: str = "wsl") -> np.ndarray:
     """Return 12×16 grid aligned with app pitch orientation."""
-    return xt_model.xT.copy()
+    return load_markov_model(model_key).xT.copy()

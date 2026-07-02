@@ -1,0 +1,45 @@
+{
+  "generated_at": "2026-07-02T12:51:50.000496+00:00",
+  "holdout_fraction": 0.3,
+  "lookahead_actions": 8,
+  "metrics": {
+    "wsl": {
+      "n_moves": 42991,
+      "auc_shot_8": 0.47011064619182064,
+      "corr_shot_8": 0.0014539441587840983,
+      "mean_delta_dangerous": -0.0015101078628737337,
+      "mean_delta_safe": -0.0017867816742668577
+    },
+    "womens": {
+      "n_moves": 152012,
+      "auc_shot_8": 0.5088951446233935,
+      "corr_shot_8": 0.004010434323368571,
+      "mean_delta_dangerous": -0.0011013912852091915,
+      "mean_delta_safe": -0.0020826860495529722
+    },
+    "top5": {
+      "n_moves": 217851,
+      "auc_shot_8": 0.5010978294595207,
+      "corr_shot_8": 0.0010870347281901924,
+      "mean_delta_dangerous": -0.0015848264618852355,
+      "mean_delta_safe": -0.0018567252160308944
+    },
+    "bayesian": {
+      "n_moves": 152012,
+      "auc_shot_8": 0.5089729275322487,
+      "corr_shot_8": 0.004015030077306964,
+      "mean_delta_dangerous": -0.0011007542327021334,
+      "mean_delta_safe": -0.002081466981858087
+    }
+  },
+  "winner": "bayesian",
+  "winner_reason": "highest_auc_tiebreak_0.5090",
+  "v33_bonus_source": "bayesian",
+  "train_sizes": {
+    "wsl": 144788,
+    "womens": 511959,
+    "top5": 706724,
+    "bayesian": 511959
+  },
+  "test_moves_evaluated": 152012
+}
