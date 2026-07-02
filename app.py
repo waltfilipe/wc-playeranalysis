@@ -14,7 +14,16 @@ from matplotlib.colors import LinearSegmentedColormap, Normalize
 from mplsoccer import Pitch
 from PIL import Image
 
-from external_models import apply_external_models, load_xt_markov_model, markov_grid_for_display
+from external_models import (
+    MARKOV_MODEL_SPECS,
+    apply_external_models,
+    get_v33_bonus_markov_key,
+    list_available_markov_models,
+    load_markov_model,
+    load_validation_report,
+    load_xt_markov_model,
+    markov_grid_for_display,
+)
 from scipy.interpolate import RegularGridInterpolator
 
 # ── PAGE CONFIG ────────────────────────────────────────────────
@@ -63,7 +72,7 @@ ARROW_HEADLENGTH = 1.15
 ARROW_ALPHA = 0.68
 ARROW_ALPHA_EMPH = 0.82
 ALL_GAMES_LABEL = "todos os jogos"
-DATA_CACHE_VERSION = 29
+DATA_CACHE_VERSION = 30
 XT_ZONE_COLS = 3
 XT_ZONE_ROWS = 2
 NX_XT = 16
@@ -142,6 +151,9 @@ XT_V32_COL_SMOOTH_KERNEL = (0.22, 0.56, 0.22)
 XT_V32_MAX_COL_STEP_DEF = 0.012
 XT_V32_MAX_COL_STEP_ATT = 0.018
 XT_V32_ATT_COL_START = 10
+
+# xT Heurístico v3.3 — bônus Markov escolhido por validação hold-out
+XT_MODEL_HEURISTIC_V33 = "heuristic_v33"
 
 # Modelo ativo para stats, impact plays e mapas de análise
 XT_PRIMARY_VARIANT = "v32"
@@ -565,9 +577,10 @@ def compute_heuristic_v31_xt_grid(n_x: int = NX_XT, n_y: int = NY_XT) -> np.ndar
 @st.cache_data(show_spinner=False)
 def compute_markov_fine_grid(
     nx: int = XT_V3_FINE_NX, ny: int = XT_V3_FINE_NY,
+    model_key: str = "wsl",
 ) -> np.ndarray:
     """Upsample aligned Markov grid to the fine heuristic mesh."""
-    grid = load_xt_markov_model().xT
+    grid = load_markov_model(model_key).xT
     y_coords = np.linspace(0.0, FIELD_Y, grid.shape[0])
     x_coords = np.linspace(0.0, FIELD_X, grid.shape[1])
     interp = RegularGridInterpolator(
@@ -580,11 +593,9 @@ def compute_markov_fine_grid(
     return interp(pts).reshape(ny, nx)
 
 
-def _markov_bonus_field(nx: int, ny: int) -> np.ndarray:
-    """Per-zone bonus from Markov (emphasized peaks, less blur)."""
-    markov = compute_markov_fine_grid(nx, ny)
-    peak = max(float(markov.max()), 1e-9)
-    rel = (markov / peak) ** XT_V32_BONUS_POWER
+def _markov_bonus_from_fine(markov_fine: np.ndarray) -> np.ndarray:
+    peak = max(float(markov_fine.max()), 1e-9)
+    rel = (markov_fine / peak) ** XT_V32_BONUS_POWER
     return _gaussian_smooth_2d(
         rel * XT_V32_QUADRANT_BONUS_MAX,
         XT_V32_BONUS_SIGMA_X,
@@ -592,13 +603,29 @@ def _markov_bonus_field(nx: int, ny: int) -> np.ndarray:
     )
 
 
+def _markov_bonus_field(nx: int, ny: int, model_key: str = "wsl") -> np.ndarray:
+    """Per-zone bonus from Markov (emphasized peaks, less blur)."""
+    markov = compute_markov_fine_grid(nx, ny, model_key=model_key)
+    return _markov_bonus_from_fine(markov)
+
+
 def _build_heuristic_v32_threat_surface(Xc: np.ndarray, Yc: np.ndarray) -> np.ndarray:
-    """Flattened v3.1 base + stronger Markov quadrant bonus."""
+    """Flattened v3.1 base + stronger Markov quadrant bonus (WSL baseline)."""
     v31 = _build_heuristic_v31_threat_surface(Xc, Yc)
     peak = max(float(v31.max()), 1e-9)
     rel = (v31 / peak) ** XT_V32_BASE_SHAPE_GAMMA
     base = XT_V32_BASE_FLOOR + rel * XT_V32_BASE_SPREAD
-    bonus = _markov_bonus_field(Xc.shape[1], Xc.shape[0])
+    bonus = _markov_bonus_field(Xc.shape[1], Xc.shape[0], model_key="wsl")
+    return np.clip(base + bonus, 0.0, XT_V32_SURFACE_MAX)
+
+
+def _build_heuristic_v33_threat_surface(Xc: np.ndarray, Yc: np.ndarray) -> np.ndarray:
+    """Flattened v3.1 base + Markov bonus from validation winner."""
+    v31 = _build_heuristic_v31_threat_surface(Xc, Yc)
+    peak = max(float(v31.max()), 1e-9)
+    rel = (v31 / peak) ** XT_V32_BASE_SHAPE_GAMMA
+    base = XT_V32_BASE_FLOOR + rel * XT_V32_BASE_SPREAD
+    bonus = _markov_bonus_field(Xc.shape[1], Xc.shape[0], model_key=get_v33_bonus_markov_key())
     return np.clip(base + bonus, 0.0, XT_V32_SURFACE_MAX)
 
 
@@ -631,8 +658,40 @@ def compute_heuristic_v32_xt_grid(n_x: int = NX_XT, n_y: int = NY_XT) -> np.ndar
     return _sample_display_grid(fine, n_x, n_y, post_process=_post)
 
 
+@st.cache_data(show_spinner=False)
+def compute_heuristic_v33_fine_grid(
+    nx: int = XT_V3_FINE_NX, ny: int = XT_V3_FINE_NY,
+    _bonus_key: str = "",
+) -> np.ndarray:
+    xe = np.linspace(0.0, FIELD_X, nx)
+    ye = np.linspace(0.0, FIELD_Y, ny)
+    Xc, Yc = np.meshgrid(xe, ye)
+    return _build_heuristic_v33_threat_surface(Xc, Yc)
+
+
+@st.cache_data(show_spinner=False)
+def compute_heuristic_v33_xt_grid(n_x: int = NX_XT, n_y: int = NY_XT, _bonus_key: str = "") -> np.ndarray:
+    fine = compute_heuristic_v33_fine_grid(_bonus_key=_bonus_key)
+
+    def _post(grid: np.ndarray) -> np.ndarray:
+        smoothed = np.array([
+            _smooth_columns_1d(grid[iy], XT_V32_COL_SMOOTH_KERNEL)
+            for iy in range(grid.shape[0])
+        ])
+        return _limit_adjacent_column_step(
+            smoothed,
+            XT_V32_MAX_COL_STEP_DEF,
+            att_col_start=XT_V32_ATT_COL_START,
+            max_step_att=XT_V32_MAX_COL_STEP_ATT,
+        )
+
+    return _sample_display_grid(fine, n_x, n_y, post_process=_post)
+
+
 def _variant_key_from_cols(cols: dict[str, str]) -> str:
     delta = cols.get("delta", "")
+    if delta.endswith("_v33"):
+        return "v33"
     if delta.endswith("_v32"):
         return "v32"
     if delta.endswith("_v31"):
@@ -648,8 +707,8 @@ def _adjust_heuristic_v3_variant_pass_delta(row, start_col: str, end_col: str) -
     if not row.is_won:
         return 0.0
     raw = float(getattr(row, end_col) - getattr(row, start_col))
-    variant = "v32" if start_col.endswith("_v32") else "v31" if start_col.endswith("_v31") else "v3"
-    scale = XT_V32_SCALE if variant == "v32" else 1.0
+    variant = "v33" if start_col.endswith("_v33") else "v32" if start_col.endswith("_v32") else "v31" if start_col.endswith("_v31") else "v3"
+    scale = XT_V32_SCALE if variant in ("v32", "v33") else 1.0
     if raw >= 0:
         adjusted = raw * _v3_short_pass_multiplier(row.pass_distance)
         return min(adjusted, _v3_zone_max_pass_delta(row.x_start) * scale)
@@ -664,7 +723,7 @@ def _adjust_heuristic_v3_variant_pass_delta(row, start_col: str, end_col: str) -
         and lat_start > XT_V3_WIDE_FRAC
         and lat_end < lat_start - 0.12
     ):
-        bonus = XT_V32_PRESSURE_ESCAPE_BONUS if variant == "v32" else XT_V3_PRESSURE_ESCAPE_BONUS
+        bonus = XT_V32_PRESSURE_ESCAPE_BONUS if variant in ("v32", "v33") else XT_V3_PRESSURE_ESCAPE_BONUS
         adjusted += bonus
     return adjusted
 
@@ -695,6 +754,15 @@ def apply_heuristic_v32_xt(df: pd.DataFrame) -> pd.DataFrame:
     return _apply_heuristic_v3_variant_xt(df, compute_heuristic_v32_fine_grid, "v32")
 
 
+def apply_heuristic_v33_xt(df: pd.DataFrame) -> pd.DataFrame:
+    bonus_key = get_v33_bonus_markov_key()
+
+    def _fine_fn():
+        return compute_heuristic_v33_fine_grid(_bonus_key=bonus_key)
+
+    return _apply_heuristic_v3_variant_xt(df, _fine_fn, "v33")
+
+
 def _max_adjacent_col_jump_pct(grid: np.ndarray) -> float:
     if grid.shape[1] < 2:
         return 0.0
@@ -713,6 +781,11 @@ def classify_xt_progressive_v3_adjusted(
     if delta_xt <= 0:
         return "none"
     if variant == "v32":
+        prog_floor = XT_V32_PROG_FLOOR_CLASS
+        high_floor = XT_V32_HIGH_FLOOR_CLASS
+        prog_scale = XT_V32_PROG_SCALE_CLASS
+        high_scale = XT_V32_HIGH_SCALE_CLASS
+    elif variant == "v33":
         prog_floor = XT_V32_PROG_FLOOR_CLASS
         high_floor = XT_V32_HIGH_FLOOR_CLASS
         prog_scale = XT_V32_PROG_SCALE_CLASS
@@ -746,6 +819,8 @@ def _xt_column_set(variant: str = "v3") -> dict[str, str]:
         return {"start": "xt_start_v31", "end": "xt_end_v31", "delta": "delta_xt_v31"}
     if variant == "v32":
         return {"start": "xt_start_v32", "end": "xt_end_v32", "delta": "delta_xt_v32"}
+    if variant == "v33":
+        return {"start": "xt_start_v33", "end": "xt_end_v33", "delta": "delta_xt_v33"}
     return {"start": "xt_start", "end": "xt_end", "delta": "delta_xt"}
 
 
@@ -843,6 +918,7 @@ def enrich_with_xt_v3(df: pd.DataFrame) -> pd.DataFrame:
         "xt_start", "xt_end", "delta_xt",
         "xt_start_v31", "xt_end_v31", "delta_xt_v31",
         "xt_start_v32", "xt_end_v32", "delta_xt_v32",
+        "xt_start_v33", "xt_end_v33", "delta_xt_v33",
     ):
         out[col] = 0.0
     out["progressive"] = False
@@ -868,6 +944,11 @@ def enrich_with_xt_v3(df: pd.DataFrame) -> pd.DataFrame:
     xt_df_v32 = apply_heuristic_v32_xt(out.loc[xt_mask].copy())
     out.loc[xt_mask, ["xt_start_v32", "xt_end_v32", "delta_xt_v32"]] = xt_df_v32[
         ["xt_start_v32", "xt_end_v32", "delta_xt_v32"]
+    ].values
+
+    xt_df_v33 = apply_heuristic_v33_xt(out.loc[xt_mask].copy())
+    out.loc[xt_mask, ["xt_start_v33", "xt_end_v33", "delta_xt_v33"]] = xt_df_v33[
+        ["xt_start_v33", "xt_end_v33", "delta_xt_v33"]
     ].values
 
     pass_mask = out["category"] == "passes"
@@ -899,6 +980,7 @@ def ensure_xt_model_columns(df: pd.DataFrame) -> pd.DataFrame:
     variant_specs = [
         ("v31", apply_heuristic_v31_xt),
         ("v32", apply_heuristic_v32_xt),
+        ("v33", apply_heuristic_v33_xt),
     ]
     for prefix, apply_fn in variant_specs:
         delta_col = f"delta_xt_{prefix}"
@@ -911,11 +993,17 @@ def ensure_xt_model_columns(df: pd.DataFrame) -> pd.DataFrame:
                     [f"xt_start_{prefix}", f"xt_end_{prefix}", delta_col]
                 ].values
 
-    if "delta_xt_markov" not in out.columns:
+    missing_markov = [
+        spec["delta_col"]
+        for spec in MARKOV_MODEL_SPECS.values()
+        if spec["delta_col"] not in out.columns
+    ]
+    if missing_markov:
         try:
             out = apply_external_models(out)
         except FileNotFoundError:
-            out["delta_xt_markov"] = np.nan
+            for col in missing_markov:
+                out[col] = np.nan
 
     return out
 
@@ -2024,7 +2112,7 @@ def _render_external_model_comparison(
                 "key": "Markov",
                 "label": "xT Markov",
                 "delta_col": "delta_xt_markov",
-                "grid_fn": lambda: markov_grid_for_display(load_xt_markov_model()),
+                "grid_fn": lambda: markov_grid_for_display("wsl"),
                 "desc": "Grid 16×12 treinado em FA WSL 2018/19 (StatsBomb Open Data).",
             }
         )
@@ -2114,6 +2202,196 @@ def _render_external_model_comparison(
         st.dataframe(pd.DataFrame(corr_rows), use_container_width=True, hide_index=True)
 
 
+def _heuristic_test_models() -> list[dict]:
+    bonus_key = get_v33_bonus_markov_key()
+    report = load_validation_report()
+    return [
+        {
+            "key": "v3.2",
+            "kind": "heuristic",
+            "label": "Heurístico v3.2",
+            "grid_fn": compute_heuristic_v32_xt_grid,
+            "delta_col": "delta_xt_v32",
+            "desc": "Base uniforme + bônus Markov WSL (baseline atual).",
+        },
+        {
+            "key": "v3.3",
+            "kind": "heuristic",
+            "label": f"Heurístico v3.3 · Markov {bonus_key}",
+            "grid_fn": lambda: compute_heuristic_v33_xt_grid(_bonus_key=bonus_key),
+            "delta_col": "delta_xt_v33",
+            "desc": (
+                f"Bônus Markov validado em hold-out "
+                f"({report.get('winner_reason', '—')})."
+            ),
+        },
+    ]
+
+
+def _markov_test_models() -> list[dict]:
+    models = []
+    for key in list_available_markov_models():
+        spec = MARKOV_MODEL_SPECS[key]
+        models.append(
+            {
+                "key": spec["label"],
+                "kind": "markov",
+                "model_key": key,
+                "label": spec["label"],
+                "grid_fn": lambda k=key: markov_grid_for_display(k),
+                "delta_col": spec["delta_col"],
+                "desc": spec["description"],
+            }
+        )
+    return models
+
+
+def _all_xt_test_models() -> list[dict]:
+    return _heuristic_test_models() + _markov_test_models()
+
+
+def render_xt_validation_section() -> None:
+    report = load_validation_report()
+    st.markdown("### Validação hold-out (StatsBomb)")
+    st.caption(
+        "Métrica: **AUC** de ΔxT para prever chute da mesma equipe nas próximas "
+        f"{report.get('lookahead_actions', 8)} ações · hold-out "
+        f"{int(float(report.get('holdout_fraction', 0.3)) * 100)}%."
+    )
+
+    metrics = report.get("metrics", {})
+    if not metrics:
+        st.info(
+            "Relatório de validação ausente. Execute "
+            "`python scripts/train_external_models.py` para gerar "
+            "`models/xt_validation_report.json`."
+        )
+        return
+
+    rows = []
+    for key, vals in metrics.items():
+        spec = MARKOV_MODEL_SPECS.get(key, {})
+        rows.append(
+            {
+                "Modelo": spec.get("label", key),
+                "Chave": key,
+                "N ações": vals.get("n_moves"),
+                "AUC chute+8": round(float(vals["auc_shot_8"]), 4)
+                if vals.get("auc_shot_8") == vals.get("auc_shot_8")
+                else None,
+                "Correlação": round(float(vals["corr_shot_8"]), 4)
+                if vals.get("corr_shot_8") == vals.get("corr_shot_8")
+                else None,
+                "ΔxT médio (perigoso)": round(float(vals["mean_delta_dangerous"]), 4)
+                if vals.get("mean_delta_dangerous") == vals.get("mean_delta_dangerous")
+                else None,
+                "ΔxT médio (seguro)": round(float(vals["mean_delta_safe"]), 4)
+                if vals.get("mean_delta_safe") == vals.get("mean_delta_safe")
+                else None,
+            }
+        )
+    df_metrics = pd.DataFrame(rows)
+    winner = report.get("winner", "—")
+    st.dataframe(df_metrics, use_container_width=True, hide_index=True)
+    st.success(
+        f"**Vencedor validação:** `{winner}` · {report.get('winner_reason', '—')} · "
+        f"v3.3 usa bônus `{report.get('v33_bonus_source', winner)}`."
+    )
+
+
+def render_xt_tests_tab(player_data: dict[str, pd.DataFrame]) -> None:
+    """Laboratório de comparação entre heurísticos e variantes Markov."""
+    match_label = ALL_GAMES_LABEL
+    test_models = _all_xt_test_models()
+
+    st.markdown("### Testes xT — laboratório de modelos")
+    st.caption(
+        "Compare o heurístico **v3.2** (baseline), **v3.3** (bônus Markov validado) "
+        "e as variantes Markov treinadas com mais dados, orientação LTR e suavização bayesiana."
+    )
+
+    render_xt_validation_section()
+    st.markdown("---")
+
+    st.markdown("### Grids 16×12")
+    for start in range(0, len(test_models), 3):
+        row_models = test_models[start : start + 3]
+        grid_cols = st.columns(len(row_models))
+        for col, model in zip(grid_cols, row_models):
+            with col:
+                try:
+                    grid = model["grid_fn"]()
+                    img, fig = draw_xt_grid_map(grid, model["label"], as_percent=True)
+                    plt.close(fig)
+                    st.image(img, use_container_width=True)
+                    st.caption(f"{model['desc']} · máx {grid.max():.3f}")
+                except FileNotFoundError as exc:
+                    st.warning(str(exc))
+
+    st.markdown("---")
+    st.markdown("### Σ ΔxT por jogador")
+    summary_rows: list[dict] = []
+    corr_base = "delta_xt_v32"
+
+    for player in PLAYERS:
+        df = player_data[player["code"]]
+        if df.empty:
+            continue
+        xt_actions = df[_xt_action_mask(df)]
+        row: dict = {"Jogador": player["name"]}
+        for model in test_models:
+            col = model["delta_col"]
+            row[model["key"]] = round(_safe_col_sum(xt_actions, col), 3)
+        summary_rows.append(row)
+
+    if summary_rows:
+        st.dataframe(pd.DataFrame(summary_rows), use_container_width=True, hide_index=True)
+
+    st.markdown("### Correlação com v3.2 (passes + conduções)")
+    corr_rows: list[dict] = []
+    for player in PLAYERS:
+        df = player_data[player["code"]]
+        if df.empty or corr_base not in df.columns:
+            continue
+        xt_actions = df[_xt_action_mask(df)]
+        corr_row: dict = {"Jogador": player["name"]}
+        for model in test_models:
+            col = model["delta_col"]
+            if col == corr_base or col not in xt_actions.columns:
+                continue
+            corr = _model_correlation(xt_actions, corr_base, col)
+            corr_row[model["key"]] = round(corr, 3) if corr is not None else None
+        corr_rows.append(corr_row)
+    if corr_rows:
+        st.dataframe(pd.DataFrame(corr_rows), use_container_width=True, hide_index=True)
+
+    st.markdown("---")
+    st.markdown("### Top 10 ΔxT por modelo")
+    for player in PLAYERS:
+        df = player_data[player["code"]]
+        st.markdown(f'<div class="player-header">{player["name"]}</div>', unsafe_allow_html=True)
+        if df.empty:
+            st.warning(f"Sem dados para {player['name']}.")
+            continue
+
+        cmp_cols = st.columns(min(3, len(test_models)))
+        for col, model in zip(cmp_cols, test_models):
+            with col:
+                st.markdown(
+                    f'<div class="map-label">{model["label"]}</div>',
+                    unsafe_allow_html=True,
+                )
+                _show_map(
+                    lambda d, n, m, mc=model["delta_col"], ml=model["key"]: draw_top_deltaxt_map(
+                        d, n, m, delta_col=mc, model_label=ml
+                    ),
+                    df,
+                    player["name"],
+                    match_label,
+                    f"Sem ΔxT positivo ({model['key']}).",
+                )
+
+
 # ── MAIN ─────────────────────────────────────────────────────
 st.markdown(
     """
@@ -2161,8 +2439,8 @@ with st.sidebar:
     )
     st.caption("xT v3.2 · Markov · 5 jogadores · Stats agregadas")
 
-tab_analysis, tab_stats, tab_compare = st.tabs(
-    ["Análise", "Stats", "Comparar modelos"]
+tab_analysis, tab_stats, tab_compare, tab_xt_tests = st.tabs(
+    ["Análise", "Stats", "Comparar modelos", "Testes xT"]
 )
 
 with tab_analysis:
@@ -2173,3 +2451,6 @@ with tab_stats:
 
 with tab_compare:
     render_xt_model_comparison(player_data)
+
+with tab_xt_tests:
+    render_xt_tests_tab(player_data)
