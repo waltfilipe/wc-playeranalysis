@@ -73,7 +73,7 @@ ARROW_HEADLENGTH = 1.15
 ARROW_ALPHA = 0.68
 ARROW_ALPHA_EMPH = 0.82
 ALL_GAMES_LABEL = "todos os jogos"
-DATA_CACHE_VERSION = 31
+DATA_CACHE_VERSION = 32
 XT_ZONE_COLS = 3
 XT_ZONE_ROWS = 2
 NX_XT = 16
@@ -156,23 +156,13 @@ XT_V32_ATT_COL_START = 10
 # xT Heurístico v3.3 — bônus Markov escolhido por validação hold-out
 XT_MODEL_HEURISTIC_V33 = "heuristic_v33"
 
-# xT Heurístico v4 — colunas homogêneas (sem penalização lateral), transições mais suaves
+# xT Heurístico v4 — v3.1 + bônus leve e suave (Markov Top5 · LTR)
 XT_MODEL_HEURISTIC_V4 = "heuristic_v4"
-XT_H4_ZONE_BLEND_WIDTH = 60.0
-XT_H4_GAUSS_SIGMA_X = 5.0
-XT_H4_COL_SMOOTH_KERNEL = (0.15, 0.70, 0.15)
-XT_H4_MAX_COL_STEP_DEF = 0.032
-XT_H4_MAX_COL_STEP_ATT = 0.050
-XT_H4_ATT_COL_START = 10
-XT_H4_SURFACE_MAX = XT_V3_SURFACE_MAX
-
-# xT Heurístico v4.1 — v4 + pequenos bônus por quadrante (Markov Top5 · ataque LTR)
-XT_MODEL_HEURISTIC_V41 = "heuristic_v41"
-XT_H41_BONUS_MAX = 0.10
-XT_H41_BONUS_POWER = 1.08
-XT_H41_BONUS_SIGMA_X = 2.5
-XT_H41_BONUS_SIGMA_Y = 1.2
-XT_H41_SURFACE_MAX = XT_V3_SURFACE_MAX
+XT_V4_MARKOV_BONUS_MAX = 0.055
+XT_V4_MARKOV_BONUS_POWER = 1.04
+XT_V4_MARKOV_BONUS_SIGMA_X = 4.5
+XT_V4_MARKOV_BONUS_SIGMA_Y = 2.5
+XT_V4_SURFACE_MAX = XT_V3_SURFACE_MAX
 
 # Modelo ativo para stats, impact plays e mapas de análise
 XT_PRIMARY_VARIANT = "v32"
@@ -725,52 +715,19 @@ def compute_heuristic_v33_xt_grid(n_x: int = NX_XT, n_y: int = NY_XT, _bonus_key
     return _sample_display_grid(fine, n_x, n_y, post_process=_post)
 
 
-def _enforce_column_constant(grid: np.ndarray) -> np.ndarray:
-    """Each pitch column shares one xT value (no lateral variation)."""
-    col_means = grid.mean(axis=0, keepdims=True)
-    return np.repeat(col_means, grid.shape[0], axis=0)
-
-
-def _map_zonal_threat_v4(x: np.ndarray) -> np.ndarray:
-    """v3.1 zonal curve with wider zone blend for smoother column transitions."""
-    blend = XT_H4_ZONE_BLEND_WIDTH
-    x = np.clip(x, 0.0, FIELD_X)
-    threat_def = XT_V3_DEF_MAX * _smootherstep(np.clip(x / OPT_ATTACKING_TWO_THIRDS_X, 0.0, 1.0))
-    mid_span = max(FINAL_THIRD_LINE_X - OPT_ATTACKING_TWO_THIRDS_X, 1.0)
-    mid_t = np.clip((x - OPT_ATTACKING_TWO_THIRDS_X) / mid_span, 0.0, 1.0)
-    threat_mid = XT_V3_DEF_MAX + (XT_V3_MID_MAX - XT_V3_DEF_MAX) * _smootherstep(mid_t)
-    att_span = max(FIELD_X - FINAL_THIRD_LINE_X, 1.0)
-    att_t = np.clip((x - FINAL_THIRD_LINE_X) / att_span, 0.0, 1.0)
-    threat_att = XT_V3_MID_MAX + (XT_V3_ATT_BYLINE - XT_V3_MID_MAX) * _smootherstep(att_t)
-    w_def = 1.0 - _smootherstep(np.clip((x - (OPT_ATTACKING_TWO_THIRDS_X - blend)) / blend, 0.0, 1.0))
-    w_att = _smootherstep(np.clip((x - (FINAL_THIRD_LINE_X - blend)) / blend, 0.0, 1.0))
-    w_mid = np.clip(1.0 - w_def - w_att, 0.0, 1.0)
-    w_sum = w_def + w_mid + w_att + 1e-12
-    return (w_def * threat_def + w_mid * threat_mid + w_att * threat_att) / w_sum
-
-
 def _build_heuristic_v4_threat_surface(Xc: np.ndarray, Yc: np.ndarray) -> np.ndarray:
-    """Column-homogeneous threat: depends on x only, no lateral discount."""
-    zonal = _map_zonal_threat_v4(Xc)
-    surface = np.clip(zonal, 0.0, XT_H4_SURFACE_MAX)
-    smoothed = _gaussian_smooth_2d(surface, XT_H4_GAUSS_SIGMA_X, 0.0)
-    smoothed = np.clip(smoothed, 0.0, XT_H4_SURFACE_MAX)
-    return _enforce_column_constant(smoothed)
-
-
-def _build_heuristic_v41_threat_surface(Xc: np.ndarray, Yc: np.ndarray) -> np.ndarray:
-    """v4 base + small quadrant bonus from Markov Top5 (attack left → right)."""
-    base = _build_heuristic_v4_threat_surface(Xc, Yc)
+    """v3.1 base + light smooth Markov Top5 quadrant bonus."""
+    base = _build_heuristic_v31_threat_surface(Xc, Yc)
     bonus = _markov_bonus_field(
         Xc.shape[1],
         Xc.shape[0],
         model_key="top5",
-        bonus_max=XT_H41_BONUS_MAX,
-        bonus_power=XT_H41_BONUS_POWER,
-        sigma_x=XT_H41_BONUS_SIGMA_X,
-        sigma_y=XT_H41_BONUS_SIGMA_Y,
+        bonus_max=XT_V4_MARKOV_BONUS_MAX,
+        bonus_power=XT_V4_MARKOV_BONUS_POWER,
+        sigma_x=XT_V4_MARKOV_BONUS_SIGMA_X,
+        sigma_y=XT_V4_MARKOV_BONUS_SIGMA_Y,
     )
-    return np.clip(base + bonus, 0.0, XT_H41_SURFACE_MAX)
+    return np.clip(base + bonus, 0.0, XT_V4_SURFACE_MAX)
 
 
 @st.cache_data(show_spinner=False)
@@ -784,49 +741,19 @@ def compute_heuristic_v4_fine_grid(
 
 
 @st.cache_data(show_spinner=False)
-def compute_heuristic_v41_fine_grid(
-    nx: int = XT_V3_FINE_NX, ny: int = XT_V3_FINE_NY,
-) -> np.ndarray:
-    xe = np.linspace(0.0, FIELD_X, nx)
-    ye = np.linspace(0.0, FIELD_Y, ny)
-    Xc, Yc = np.meshgrid(xe, ye)
-    return _build_heuristic_v41_threat_surface(Xc, Yc)
-
-
-@st.cache_data(show_spinner=False)
 def compute_heuristic_v4_xt_grid(n_x: int = NX_XT, n_y: int = NY_XT) -> np.ndarray:
     fine = compute_heuristic_v4_fine_grid()
 
     def _post(grid: np.ndarray) -> np.ndarray:
         smoothed = np.array([
-            _smooth_columns_1d(grid[iy], XT_H4_COL_SMOOTH_KERNEL)
-            for iy in range(grid.shape[0])
-        ])
-        stepped = _limit_adjacent_column_step(
-            smoothed,
-            XT_H4_MAX_COL_STEP_DEF,
-            att_col_start=XT_H4_ATT_COL_START,
-            max_step_att=XT_H4_MAX_COL_STEP_ATT,
-        )
-        return _enforce_column_constant(stepped)
-
-    return _sample_display_grid(fine, n_x, n_y, post_process=_post)
-
-
-@st.cache_data(show_spinner=False)
-def compute_heuristic_v41_xt_grid(n_x: int = NX_XT, n_y: int = NY_XT) -> np.ndarray:
-    fine = compute_heuristic_v41_fine_grid()
-
-    def _post(grid: np.ndarray) -> np.ndarray:
-        smoothed = np.array([
-            _smooth_columns_1d(grid[iy], XT_H4_COL_SMOOTH_KERNEL)
+            _smooth_columns_1d(grid[iy], XT_V31_COL_SMOOTH_KERNEL)
             for iy in range(grid.shape[0])
         ])
         return _limit_adjacent_column_step(
             smoothed,
-            XT_H4_MAX_COL_STEP_DEF,
-            att_col_start=XT_H4_ATT_COL_START,
-            max_step_att=XT_H4_MAX_COL_STEP_ATT,
+            XT_V31_MAX_COL_STEP_DEF,
+            att_col_start=XT_V31_ATT_COL_START,
+            max_step_att=XT_V31_MAX_COL_STEP_ATT,
         )
 
     return _sample_display_grid(fine, n_x, n_y, post_process=_post)
@@ -834,8 +761,6 @@ def compute_heuristic_v41_xt_grid(n_x: int = NX_XT, n_y: int = NY_XT) -> np.ndar
 
 def _variant_key_from_cols(cols: dict[str, str]) -> str:
     delta = cols.get("delta", "")
-    if delta.endswith("_v41"):
-        return "v41"
     if delta.endswith("_v4"):
         return "v4"
     if delta.endswith("_v33"):
@@ -856,8 +781,7 @@ def _adjust_heuristic_v3_variant_pass_delta(row, start_col: str, end_col: str) -
         return 0.0
     raw = float(getattr(row, end_col) - getattr(row, start_col))
     variant = (
-        "v41" if start_col.endswith("_v41")
-        else "v4" if start_col.endswith("_v4")
+        "v4" if start_col.endswith("_v4")
         else "v33" if start_col.endswith("_v33")
         else "v32" if start_col.endswith("_v32")
         else "v31" if start_col.endswith("_v31")
@@ -922,10 +846,6 @@ def apply_heuristic_v4_xt(df: pd.DataFrame) -> pd.DataFrame:
     return _apply_heuristic_v3_variant_xt(df, compute_heuristic_v4_fine_grid, "v4")
 
 
-def apply_heuristic_v41_xt(df: pd.DataFrame) -> pd.DataFrame:
-    return _apply_heuristic_v3_variant_xt(df, compute_heuristic_v41_fine_grid, "v41")
-
-
 def _max_adjacent_col_jump_pct(grid: np.ndarray) -> float:
     if grid.shape[1] < 2:
         return 0.0
@@ -986,8 +906,6 @@ def _xt_column_set(variant: str = "v3") -> dict[str, str]:
         return {"start": "xt_start_v33", "end": "xt_end_v33", "delta": "delta_xt_v33"}
     if variant == "v4":
         return {"start": "xt_start_v4", "end": "xt_end_v4", "delta": "delta_xt_v4"}
-    if variant == "v41":
-        return {"start": "xt_start_v41", "end": "xt_end_v41", "delta": "delta_xt_v41"}
     return {"start": "xt_start", "end": "xt_end", "delta": "delta_xt"}
 
 
@@ -1087,7 +1005,6 @@ def enrich_with_xt_v3(df: pd.DataFrame) -> pd.DataFrame:
         "xt_start_v32", "xt_end_v32", "delta_xt_v32",
         "xt_start_v33", "xt_end_v33", "delta_xt_v33",
         "xt_start_v4", "xt_end_v4", "delta_xt_v4",
-        "xt_start_v41", "xt_end_v41", "delta_xt_v41",
     ):
         out[col] = 0.0
     out["progressive"] = False
@@ -1125,11 +1042,6 @@ def enrich_with_xt_v3(df: pd.DataFrame) -> pd.DataFrame:
         ["xt_start_v4", "xt_end_v4", "delta_xt_v4"]
     ].values
 
-    xt_df_v41 = apply_heuristic_v41_xt(out.loc[xt_mask].copy())
-    out.loc[xt_mask, ["xt_start_v41", "xt_end_v41", "delta_xt_v41"]] = xt_df_v41[
-        ["xt_start_v41", "xt_end_v41", "delta_xt_v41"]
-    ].values
-
     pass_mask = out["category"] == "passes"
     cols_primary = _primary_xt_cols()
     for idx, row in out.loc[pass_mask].iterrows():
@@ -1161,7 +1073,6 @@ def ensure_xt_model_columns(df: pd.DataFrame) -> pd.DataFrame:
         ("v32", apply_heuristic_v32_xt),
         ("v33", apply_heuristic_v33_xt),
         ("v4", apply_heuristic_v4_xt),
-        ("v41", apply_heuristic_v41_xt),
     ]
     for prefix, apply_fn in variant_specs:
         delta_col = f"delta_xt_{prefix}"
@@ -2413,18 +2324,10 @@ def _heuristic_test_models() -> list[dict]:
         {
             "key": "v4",
             "kind": "heuristic",
-            "label": "Heurístico v4",
+            "label": "Heurístico v4 · Markov Top5",
             "grid_fn": compute_heuristic_v4_xt_grid,
             "delta_col": "delta_xt_v4",
-            "desc": "v3.1 sem lateral · colunas homogêneas · transições mais suaves.",
-        },
-        {
-            "key": "v4.1",
-            "kind": "heuristic",
-            "label": "Heurístico v4.1 · Markov Top5",
-            "grid_fn": compute_heuristic_v41_xt_grid,
-            "delta_col": "delta_xt_v41",
-            "desc": "v4 + pequenos bônus por quadrante (Markov Top5 · ataque esquerda→direita).",
+            "desc": "v3.1 + bônus leve e suave por região (Markov Top5 · LTR).",
         },
     ]
 
@@ -2630,7 +2533,7 @@ def render_xt_tests_tab(player_data: dict[str, pd.DataFrame]) -> None:
     render_markov_fields_comparison()
     st.markdown("---")
 
-    st.markdown("### Grids heurísticos (v3.2 · v3.3 · v4 · v4.1)")
+    st.markdown("### Grids heurísticos (v3.2 · v3.3 · v4)")
     heuristic_models = _heuristic_test_models()
     hcols = st.columns(len(heuristic_models))
     for col, model in zip(hcols, heuristic_models):
